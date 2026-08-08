@@ -313,12 +313,15 @@ class DashboardPage:
     def _update_card(self, card, device: dict):
         """就地更新卡片内容（不重建控件）。"""
         status = device.get('_status', 'unknown')
+        if not device.get('is_enabled'):
+            status = 'disabled'
         is_maintenance = device.get('is_maintenance', False)
         colors = {
             'online': ('#52C41A', '在线', '#F6FFED'),
             'offline': ('#FF4D4F', '离线', '#FFF1F0'),
             'pending_failure': ('#FA8C16', '待定', '#FFF7E6'),
             'unknown': ('#999', '未知', '#FAFAFA'),
+            'disabled': ('#8C8C8C', '未启用', '#FAFAFA'),
         }
         color, status_text, bg = colors.get(status, colors['unknown'])
         card.setStyleSheet(f"""
@@ -361,6 +364,8 @@ class DashboardPage:
         from PySide6.QtGui import QFont
 
         status = device.get('_status', 'unknown')
+        if not device.get('is_enabled'):
+            status = 'disabled'
         is_maintenance = device.get('is_maintenance', False)
 
         colors = {
@@ -368,6 +373,7 @@ class DashboardPage:
             'offline': ('#FF4D4F', '离线', '#FFF1F0'),
             'pending_failure': ('#FA8C16', '待定', '#FFF7E6'),
             'unknown': ('#999', '未知', '#FAFAFA'),
+            'disabled': ('#8C8C8C', '未启用', '#FAFAFA'),
         }
         color, status_text, bg = colors.get(status, colors['unknown'])
 

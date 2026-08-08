@@ -230,6 +230,13 @@ class AlertEngine:
         """返回所有未确认的告警事件。"""
         return self._alert_repo.get_unacknowledged_offline_events()
 
+    def reload_channels(self, config: dict):
+        """按最新配置重建通知通道（GUI 保存配置后调用）。"""
+        from ..notify.base_channel import ChannelFactory
+        self._channels = ChannelFactory.create_all(config)
+        logger.info(f"通知通道已重载：{len(self._channels)} 个")
+        return len(self._channels)
+
     def run_escalation_loop(self):
         """
         启动升级检查后台线程（每 60 秒扫描一次）。

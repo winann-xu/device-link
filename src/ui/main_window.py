@@ -38,7 +38,8 @@ class MainWindow:
       - start_minimized → 启动直接进托盘
     """
 
-    def __init__(self, config: dict, scheduler, device_repo, history_repo, alert_repo):
+    def __init__(self, config: dict, scheduler, device_repo, history_repo, alert_repo,
+                 alert_engine=None, config_path=None):
         """
         初始化主窗口。
 
@@ -64,6 +65,8 @@ class MainWindow:
         self._device_repo = device_repo
         self._history_repo = history_repo
         self._alert_repo = alert_repo
+        self._alert_engine = alert_engine
+        self._config_path = config_path
 
         ui_cfg = config.get('ui', {})
         self._accent_color = ui_cfg.get('accent_color', '#1890FF')
@@ -137,7 +140,11 @@ class MainWindow:
 
         try:
             from .alert_config_panel import AlertConfigPanel
-            self._alert_config_panel = AlertConfigPanel(config, alert_repo)
+            self._alert_config_panel = AlertConfigPanel(
+                config, alert_repo,
+                alert_engine=getattr(self, '_alert_engine', None),
+                config_path=getattr(self, '_config_path', None),
+            )
             self._stack.addWidget(self._alert_config_panel._widget)
             self._pages.append(self._alert_config_panel)
         except Exception as e:

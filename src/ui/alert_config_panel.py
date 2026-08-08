@@ -18,7 +18,7 @@ class AlertConfigPanel:
     三通道卡片 + 合并策略 + 全局规则 + 维护窗口管理。
     """
 
-    def __init__(self, config: dict, alert_repo):
+    def __init__(self, config: dict, alert_repo, alert_engine=None, config_path=None):
         from PySide6.QtWidgets import (
             QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
             QTabWidget, QFormLayout, QLineEdit, QSpinBox, QCheckBox,
@@ -29,6 +29,9 @@ class AlertConfigPanel:
 
         self._config = config
         self._alert_repo = alert_repo
+        self._alert_engine = alert_engine
+        self._config_path = config_path
+        self._channels = {}
         notify_cfg = config.get('notify', {})
 
         self._widget = QWidget()
@@ -161,6 +164,8 @@ class AlertConfigPanel:
         enabled.setStyleSheet("font-size: 16px; font-weight: bold;")
         layout.addWidget(enabled)
 
+        entry = {"enabled": enabled}
+
         form = QFormLayout()
         form.setSpacing(12)
 
@@ -185,6 +190,8 @@ class AlertConfigPanel:
             recipients = QLineEdit(', '.join(cfg.get('recipients', [])) if isinstance(cfg.get('recipients'), list) else cfg.get('recipients', ''))
             recipients.setPlaceholderText("admin@example.com, ops@example.com")
             form.addRow("收件人:", recipients)
+            entry.update(host=smtp_host, port=smtp_port, user=smtp_user,
+                         passwd=smtp_pass, recipients=recipients)
 
         elif channel_type in ('feishu', 'wecom'):
             webhook_url = QLineEdit(cfg.get('webhook_url', ''))
@@ -193,6 +200,7 @@ class AlertConfigPanel:
                 else "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx"
             )
             form.addRow("Webhook URL:", webhook_url)
+            entry["webhook"] = webhook_url
 
         layout.addLayout(form)
 
@@ -207,6 +215,8 @@ class AlertConfigPanel:
         layout.addWidget(test_btn)
         layout.addStretch()
 
+        self._channels[channel_type] = entry
+
         return tab
 
     def _group_style(self) -> str:
@@ -220,22 +230,116 @@ class AlertConfigPanel:
         """
 
     def _on_test_channel(self, channel_type: str):
-        """测试通知通道连通性（简化版）。"""
+        """读取当前表单配置并发送测试消息，展示真实结果。"""
         from PySide6.QtWidgets import QMessageBox
-        QMessageBox.information(
-            self._widget, "测试结果",
-            f"{channel_type} 通道测试功能：请在完整 GUI 环境中使用保存配置后的测试按钮。"
-        )
+        try:
+            cfg = self._collect_channel_config(channel_type)
+        except ValueError as e:
+            QMessageBox.warning(self._widget, "测试结果", str(e))
+            return
+
+        if channel_type == 'email':
+            from ..notify.email_channel import EmailChannel
+            ch = EmailChannel(cfg, self._config.get('notify', {}))
+        elif channel_type == 'feishu':
+            from ..notify.feishu_channel import FeishuChannel
+            ch = FeishuChannel(cfg)
+        else:
+            from ..notify.wecom_channel import WeComChannel
+            ch = WeComChannel(cfg)
+
+        res = ch.test()
+        if res.success:
+            QMessageBox.information(
+                self._widget, "测试结果",
+                f"✅ {channel_type} 测试发送成功（{res.latency_ms:.0f} ms）",
+            )
+        else:
+            QMessageBox.critical(
+                self._widget, "测试结果",
+                f"❌ {channel_type} 测试发送失败\n{(res.error or '未知错误')[:400]}",
+            )
 
     def _on_save_config(self):
-        """保存配置（简化版提示）。"""
+        """收集表单配置 → 更新内存 → 写入 config.yaml → 重载引擎通道。"""
         from PySide6.QtWidgets import QMessageBox
-        QMessageBox.information(self._widget, "提示",
-                                 "配置保存功能在完整环境中可用。\n当前界面为预览模式。")
+        notify = self._config.setdefault('notify', {})
+        try:
+            for t in ('email', 'feishu', 'wecom'):
+                notify[t] = self._collect_channel_config(t)
+        except ValueError as e:
+            QMessageBox.warning(self._widget, "保存配置", f"保存失败：{e}")
+            return
+
+        saved = False
+        if self._config_path:
+            try:
+                import os
+                import yaml
+                os.makedirs(os.path.dirname(self._config_path), exist_ok=True)
+                with open(self._config_path, 'w', encoding='utf-8') as f:
+                    yaml.safe_dump(self._config, f, allow_unicode=True, sort_keys=False)
+                saved = True
+            except Exception as e:
+                QMessageBox.critical(self._widget, "保存配置", f"写入配置文件失败：{e}")
+                return
+
+        n = 0
+        if self._alert_engine is not None:
+            n = self._alert_engine.reload_channels(self._config)
+
+        msg = f"配置已保存并生效，当前启用通知通道 {n} 个。"
+        if not saved:
+            msg = "配置已更新到内存（未写入文件）。"
+        QMessageBox.information(self._widget, "保存配置", msg)
+
+    def _collect_channel_config(self, channel_type: str) -> dict:
+        """从表单读取通道配置；校验必填项。密码为空或仍为掩码时保留旧值。"""
+        entry = self._channels.get(channel_type)
+        if not entry:
+            raise ValueError("通道表单未初始化")
+        cfg = dict(self._config.get('notify', {}).get(channel_type, {}))
+        cfg['enabled'] = entry['enabled'].isChecked()
+
+        if channel_type == 'email':
+            cfg['smtp_host'] = entry['host'].text().strip()
+            cfg['smtp_port'] = entry['port'].value()
+            cfg['smtp_user'] = entry['user'].text().strip()
+            pwd = entry['passwd'].text()
+            if pwd and not set(pwd) <= {'*'}:
+                from ..utils.crypto import encrypt
+                cfg['smtp_password'] = encrypt(pwd)
+            cfg.setdefault('smtp_password', '')
+            # 465 = 隐式 SSL；其余（587 等）= STARTTLS
+            cfg['use_ssl'] = (cfg.get('smtp_port', 465) == 465)
+            cfg.setdefault('sender_name', 'DEVICE LINK')
+            cfg['recipients'] = [r.strip() for r in entry['recipients'].text().split(',') if r.strip()]
+            if cfg['enabled'] and (not cfg['smtp_host'] or not cfg['smtp_user']):
+                raise ValueError("请填写 SMTP 服务器、用户名")
+            if cfg['enabled'] and not cfg['recipients']:
+                raise ValueError("请至少填写一个收件人")
+        else:
+            cfg['webhook_url'] = entry['webhook'].text().strip()
+            if cfg['enabled'] and not cfg['webhook_url']:
+                raise ValueError("请填写 Webhook URL")
+        return cfg
 
     def refresh(self):
-        """刷新页面。"""
-        pass
+        """从配置重新填充表单值。"""
+        notify = self._config.get('notify', {})
+        for t, entry in self._channels.items():
+            cfg = notify.get(t, {})
+            entry['enabled'].setChecked(cfg.get('enabled', False))
+            if t == 'email':
+                entry['host'].setText(cfg.get('smtp_host', ''))
+                entry['port'].setValue(cfg.get('smtp_port', 465))
+                entry['user'].setText(cfg.get('smtp_user', ''))
+                pwd = cfg.get('smtp_password', '')
+                entry['passwd'].setText('*' * min(len(pwd), 12) if pwd else '')
+                rcpts = cfg.get('recipients', [])
+                entry['recipients'].setText(', '.join(rcpts) if isinstance(rcpts, list) else str(rcpts or ''))
+            else:
+                entry['webhook'].setText(cfg.get('webhook_url', ''))
 
     @property
     def widget(self):

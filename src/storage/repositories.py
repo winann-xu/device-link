@@ -201,6 +201,8 @@ class DeviceRepository:
         with open(filepath, 'r', encoding='utf-8-sig') as f:
             reader = csv.DictReader(f)
             for row in reader:
+                # 是否启用：空值视为启用（避免带空单元格的 CSV 导入后设备被静默禁用）
+                enabled_raw = (row.get('是否启用') or '是').strip()
                 devices.append({
                     'name': row.get('设备名', '').strip(),
                     'ip_address': row.get('IP', '').strip(),
@@ -209,7 +211,7 @@ class DeviceRepository:
                     'port': int(row.get('端口', 0) or 0),
                     'check_interval_seconds': int(row.get('检查间隔', 30) or 30),
                     'failure_threshold': int(row.get('失败阈值', 3) or 3),
-                    'is_enabled': 1 if row.get('是否启用', '是').strip() in ('是', '1', 'true', 'yes') else 0,
+                    'is_enabled': 1 if enabled_raw in ('是', '1', 'true', 'yes') else 0,
                 })
         return self.add_devices_batch(devices)
 

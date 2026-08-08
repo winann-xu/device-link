@@ -145,6 +145,7 @@ def main():
 
     # 1. 加载配置
     config = load_config(args.config)
+    config_path = args.config or os.path.join(_project_root, 'config', 'config.yaml')
 
     # 2. 配置日志
     setup_logging(config)
@@ -221,7 +222,8 @@ def main():
             app.setApplicationName("DEVICE LINK")
             app.setOrganizationName("DEVICE-LINK")
 
-            window = MainWindow(config, scheduler, device_repo, history_repo, alert_repo)
+            window = MainWindow(config, scheduler, device_repo, history_repo, alert_repo,
+                                alert_engine=alert_engine, config_path=config_path)
             window.show()
 
             if config.get('app', {}).get('start_minimized', False):
