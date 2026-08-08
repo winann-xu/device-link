@@ -217,6 +217,7 @@ class DevicePanelPage:
                     'failure_threshold': threshold_spin.value(),
                 })
                 self.refresh()
+                self._sync_scheduler()
             except Exception as e:
                 if 'UNIQUE' in str(e) or 'unique' in str(e):
                     QMessageBox.warning(self._widget, "错误", f"设备名已存在: {name}")
@@ -272,6 +273,7 @@ class DevicePanelPage:
                 'failure_threshold': threshold_spin.value(),
             })
             self.refresh()
+            self._sync_scheduler()
 
     def _on_delete_batch(self):
         """批量删除选中设备。"""
@@ -288,6 +290,7 @@ class DevicePanelPage:
             count = self._device_repo.delete_devices(ids)
             QMessageBox.information(self._widget, "完成", f"已删除 {count} 台设备")
             self.refresh()
+            self._sync_scheduler()
 
     def _on_import_csv(self):
         """导入 CSV 文件。"""
@@ -304,6 +307,7 @@ class DevicePanelPage:
                 )
             QMessageBox.information(self._widget, "导入结果", msg)
             self.refresh()
+            self._sync_scheduler()
 
     def _on_export_csv(self):
         """导出 CSV 文件。"""
@@ -350,6 +354,23 @@ class DevicePanelPage:
         count = self._device_repo.set_maintenance_batch(ids, is_maintenance)
         QMessageBox.information(self._widget, "完成",
                                  f"已将 {count} 台设备{'设为' if is_maintenance else '取消'}维护模式")
+        self.refresh()
+        self._sync_scheduler()
+
+    def _sync_scheduler(self):
+        """把数据库所有设备同步到调度器：启用且非维护 → 加入；否则移除。
+        修复：手动添加/导入/编辑/删除/维护后，运行中的调度器不会感知新设备，
+        导致设备状态永不更新（调度器一直按启动时的设备列表运行）。"""
+        if self._scheduler is None:
+            return
+        try:
+            for d in self._device_repo.list_devices():
+                if d.get('is_enabled') and not d.get('is_maintenance'):
+                    self._scheduler.add_device(d)
+                else:
+                    self._scheduler.remove_device(d['id'])
+        except Exception as e:
+            logger.error(f"同步调度器失败: {e}")
 
     @property
     def widget(self):
