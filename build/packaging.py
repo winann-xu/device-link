@@ -129,7 +129,7 @@ def create_zip_package():
         print("未找到 exe 文件，跳过 zip 打包")
         return
 
-    version = "1.0.0"
+    version = "1.0.1"
     zip_name = f"DEVICE-LINK-v{version}.zip"
     zip_path = DIST / zip_name
 

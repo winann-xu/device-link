@@ -68,17 +68,17 @@ def load_config(config_path: str = None) -> dict:
 
     # 如果用户配置不存在，从默认配置复制
     if not os.path.exists(config_path):
-        import shutil
-        os.makedirs(os.path.dirname(config_path), exist_ok=True)
-        if os.path.exists(default_config):
-            shutil.copy(default_config, config_path)
-            logger.info(f"已创建默认配置文件: {config_path}")
-        else:
-            # 兜底：默认配置也不存在时写入最小可用配置，避免首启崩溃
-            logger.warning(f"默认配置文件不存在: {default_config}，写入最小配置")
-            with open(config_path, 'w', encoding='utf-8') as f:
-                yaml.safe_dump({
-                    "app": {"name": "DEVICE LINK", "version": "1.0.0",
+        try:
+            import shutil
+            os.makedirs(os.path.dirname(config_path), exist_ok=True)
+            if os.path.exists(default_config):
+                shutil.copy(default_config, config_path)
+                logger.info(f"已创建默认配置文件: {config_path}")
+            else:
+                logger.warning(f"默认配置文件不存在: {default_config}，写入最小配置")
+                with open(config_path, 'w', encoding='utf-8') as f:
+                    yaml.safe_dump({
+                    "app": {"name": "DEVICE LINK", "version": "1.0.1",
                             "start_minimized": True, "minimize_to_tray": True,
                             "single_instance": True},
                     "monitor": {"default_interval_seconds": 30,
@@ -103,7 +103,10 @@ def load_config(config_path: str = None) -> dict:
                            "font_family": "Microsoft YaHei", "refresh_ms": 2000,
                            "tray_notify_on_event": True,
                            "card_border_radius": 8, "enable_animations": True},
-                }, f, allow_unicode=True)
+                    }, f, allow_unicode=True)
+        except Exception as e:
+            # 安装目录不可写：用内存默认配置继续运行，不崩溃
+            logger.error(f"无法写入配置文件 {config_path}: {e}，使用默认配置运行")
 
     try:
         with open(config_path, 'r', encoding='utf-8') as f:
@@ -122,17 +125,31 @@ def setup_logging(config: dict):
     if not os.path.isabs(log_path):
         log_path = os.path.join(_project_root, log_path)
 
-    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    handlers = []
+    try:
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        handlers.append(logging.FileHandler(log_path, encoding='utf-8'))
+    except Exception as e:
+        # 安装目录不可写时降级到用户可写目录，保证日志一定可用
+        fallback_dir = os.path.join(
+            os.environ.get('LOCALAPPDATA', os.path.expanduser('~')),
+            'DEVICE-LINK', 'logs')
+        try:
+            os.makedirs(fallback_dir, exist_ok=True)
+            fallback_path = os.path.join(fallback_dir, 'device-link.log')
+            handlers.append(logging.FileHandler(fallback_path, encoding='utf-8'))
+            print(f"[setup_logging] 默认日志路径不可写，降级到: {fallback_path} ({e})")
+        except Exception as e2:
+            print(f"[setup_logging] 日志初始化失败: {e2}")
 
+    handlers.append(logging.StreamHandler(sys.stdout))
     logging.basicConfig(
         level=level,
         format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
-        handlers=[
-            logging.FileHandler(log_path, encoding='utf-8'),
-            logging.StreamHandler(sys.stdout),
-        ]
+        handlers=handlers,
     )
-    logger.info(f"日志已初始化: level={logging.getLevelName(level)}, path={log_path}")
+    logger.info(f"日志已初始化: level={logging.getLevelName(level)}, path={log_path}, "
+                f"exe_dir={_project_root}")
 
 
 def main():
@@ -252,4 +269,26 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except Exception as e:
+        import datetime
+        import traceback
+        tb = traceback.format_exc()
+        fatal_dir = os.path.join(
+            os.environ.get('LOCALAPPDATA', os.path.expanduser('~')), 'DEVICE-LINK')
+        fatal = os.path.join(fatal_dir, 'fatal.log')
+        try:
+            os.makedirs(fatal_dir, exist_ok=True)
+            with open(fatal, 'a', encoding='utf-8') as f:
+                f.write(f"\n[{datetime.datetime.now()}] {tb}\n")
+        except Exception:
+            pass
+        try:
+            from PySide6.QtWidgets import QApplication, QMessageBox
+            app = QApplication.instance() or QApplication([])
+            QMessageBox.critical(None, "DEVICE LINK 启动失败",
+                                 f"启动过程发生错误：\n{e}\n\n详情见 {fatal}")
+        except Exception:
+            pass
+        raise
