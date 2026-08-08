@@ -18,7 +18,8 @@ class AlertConfigPanel:
     三通道卡片 + 合并策略 + 全局规则 + 维护窗口管理。
     """
 
-    def __init__(self, config: dict, alert_repo, alert_engine=None, config_path=None):
+    def __init__(self, config: dict, alert_repo, alert_engine=None,
+                 config_path=None, device_repo=None, scheduler=None):
         from PySide6.QtWidgets import (
             QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
             QTabWidget, QFormLayout, QLineEdit, QSpinBox, QCheckBox,
@@ -31,8 +32,11 @@ class AlertConfigPanel:
         self._alert_repo = alert_repo
         self._alert_engine = alert_engine
         self._config_path = config_path
+        self._device_repo = device_repo
+        self._scheduler = scheduler
         self._channels = {}
         notify_cfg = config.get('notify', {})
+        monitor_cfg = config.get('monitor', {})
 
         self._widget = QWidget()
         layout = QVBoxLayout(self._widget)
@@ -77,24 +81,25 @@ class AlertConfigPanel:
         digest_group.setStyleSheet(self._group_style())
         dlayout = QFormLayout(digest_group)
 
-        digest_enabled = QCheckBox()
-        digest_enabled.setChecked(digest_cfg.get('enabled', True))
-        dlayout.addRow("启用告警合并摘要:", digest_enabled)
+        self._digest_enabled_cb = QCheckBox()
+        self._digest_enabled_cb.setChecked(digest_cfg.get('enabled', True))
+        dlayout.addRow("启用告警合并摘要:", self._digest_enabled_cb)
 
-        window_spin = QSpinBox()
-        window_spin.setRange(1, 60)
-        window_spin.setValue(digest_cfg.get('window_seconds', 300) // 60)
-        window_spin.setSuffix(" 分钟")
-        dlayout.addRow("合并时间窗口:", window_spin)
+        self._digest_window_spin = QSpinBox()
+        self._digest_window_spin.setRange(1, 60)
+        self._digest_window_spin.setValue(digest_cfg.get('window_seconds', 300) // 60)
+        self._digest_window_spin.setSuffix(" 分钟")
+        dlayout.addRow("合并时间窗口:", self._digest_window_spin)
 
-        max_events = QSpinBox()
-        max_events.setRange(5, 200)
-        max_events.setValue(digest_cfg.get('max_events_per_digest', 50))
-        dlayout.addRow("单封摘要最多:", max_events)
+        self._digest_max_spin = QSpinBox()
+        self._digest_max_spin.setRange(5, 200)
+        self._digest_max_spin.setValue(digest_cfg.get('max_events_per_digest', 50))
+        dlayout.addRow("单封摘要最多:", self._digest_max_spin)
 
-        critical_enabled = QCheckBox()
-        critical_enabled.setChecked(digest_cfg.get('send_immediate_if_critical', True))
-        dlayout.addRow("紧急绕过（同子系统≥5台立即发送）:", critical_enabled)
+        self._digest_critical_cb = QCheckBox()
+        self._digest_critical_cb.setChecked(
+            digest_cfg.get('send_immediate_if_critical', True))
+        dlayout.addRow("紧急绕过（同子系统≥5台立即发送）:", self._digest_critical_cb)
 
         clayout.addWidget(digest_group)
 
@@ -103,31 +108,40 @@ class AlertConfigPanel:
         rule_group.setStyleSheet(self._group_style())
         rlayout = QFormLayout(rule_group)
 
-        n_slider = QSlider(Qt.Horizontal)
-        n_slider.setRange(1, 10)
-        n_slider.setValue(3)
-        n_label = QLabel("3")
-        n_slider.valueChanged.connect(lambda v: n_label.setText(str(v)))
-        rlayout.addRow(QLabel("失败阈值 N:"), n_slider)
+        self._rule_n_slider = QSlider(Qt.Horizontal)
+        self._rule_n_slider.setRange(1, 10)
+        self._rule_n_slider.setValue(
+            monitor_cfg.get('default_failure_threshold', 3))
+        n_label = QLabel(str(self._rule_n_slider.value()))
+        self._rule_n_slider.valueChanged.connect(
+            lambda v: n_label.setText(str(v)))
+        rlayout.addRow(QLabel("失败阈值 N:"), self._rule_n_slider)
         rlayout.addRow("", n_label)
 
-        m_slider = QSlider(Qt.Horizontal)
-        m_slider.setRange(1, 5)
-        m_slider.setValue(2)
-        m_label = QLabel("2")
-        m_slider.valueChanged.connect(lambda v: m_label.setText(str(v)))
-        rlayout.addRow(QLabel("恢复阈值 M:"), m_slider)
+        self._rule_m_slider = QSlider(Qt.Horizontal)
+        self._rule_m_slider.setRange(1, 5)
+        self._rule_m_slider.setValue(
+            monitor_cfg.get('default_recovery_threshold', 2))
+        m_label = QLabel(str(self._rule_m_slider.value()))
+        self._rule_m_slider.valueChanged.connect(
+            lambda v: m_label.setText(str(v)))
+        rlayout.addRow(QLabel("恢复阈值 M:"), self._rule_m_slider)
         rlayout.addRow("", m_label)
 
-        cooldown = QComboBox()
-        cooldown.addItems(['15 分钟', '30 分钟', '60 分钟'])
-        cooldown.setCurrentIndex(1)
-        rlayout.addRow("冷却窗口:", cooldown)
+        self._rule_cooldown_combo = QComboBox()
+        self._rule_cooldown_combo.addItems(['15 分钟', '30 分钟', '60 分钟'])
+        cooldown_seconds = notify_cfg.get('cooldown_seconds', 1800)
+        self._rule_cooldown_combo.setCurrentIndex(
+            {900: 0, 1800: 1, 3600: 2}.get(cooldown_seconds, 1))
+        rlayout.addRow("冷却窗口:", self._rule_cooldown_combo)
 
-        escalation = QComboBox()
-        escalation.addItems(['5 分钟', '15 分钟', '30 分钟', '60 分钟'])
-        escalation.setCurrentIndex(2)
-        rlayout.addRow("升级时间:", escalation)
+        self._rule_escalation_combo = QComboBox()
+        self._rule_escalation_combo.addItems(
+            ['5 分钟', '15 分钟', '30 分钟', '60 分钟'])
+        escalation_minutes = notify_cfg.get('escalation_minutes', 15)
+        self._rule_escalation_combo.setCurrentIndex(
+            {5: 0, 15: 1, 30: 2, 60: 3}.get(escalation_minutes, 1))
+        rlayout.addRow("升级时间:", self._rule_escalation_combo)
 
         clayout.addWidget(rule_group)
 
@@ -271,6 +285,27 @@ class AlertConfigPanel:
             QMessageBox.warning(self._widget, "保存配置", f"保存失败：{e}")
             return
 
+        # 合并策略
+        notify['digest'] = {
+            'enabled': self._digest_enabled_cb.isChecked(),
+            'window_seconds': self._digest_window_spin.value() * 60,
+            'max_events_per_digest': self._digest_max_spin.value(),
+            'send_immediate_if_critical': self._digest_critical_cb.isChecked(),
+        }
+        # 冷却/升级
+        notify['cooldown_seconds'] = {
+            '15 分钟': 900, '30 分钟': 1800, '60 分钟': 3600
+        }.get(self._rule_cooldown_combo.currentText(), 1800)
+        notify['escalation_minutes'] = {
+            '5 分钟': 5, '15 分钟': 15, '30 分钟': 30, '60 分钟': 60
+        }.get(self._rule_escalation_combo.currentText(), 15)
+        # 全局失败/恢复阈值
+        failure_n = self._rule_n_slider.value()
+        recovery_m = self._rule_m_slider.value()
+        self._config.setdefault('monitor', {})
+        self._config['monitor']['default_failure_threshold'] = failure_n
+        self._config['monitor']['default_recovery_threshold'] = recovery_m
+
         saved = False
         if self._config_path:
             try:
@@ -284,11 +319,37 @@ class AlertConfigPanel:
                 QMessageBox.critical(self._widget, "保存配置", f"写入配置文件失败：{e}")
                 return
 
+        # 全局阈值应用到现有设备（DB）与运行中的状态机（调度器）
+        applied_devices = 0
+        if self._device_repo is not None:
+            try:
+                devices = self._device_repo.list_devices()
+                for d in devices:
+                    self._device_repo.update_device(d['id'], {
+                        'failure_threshold': failure_n,
+                        'recovery_threshold': recovery_m,
+                    })
+                    applied_devices += 1
+            except Exception as e:
+                logger.error(f"应用全局阈值到设备失败: {e}")
+        if self._scheduler is not None:
+            try:
+                self._scheduler.apply_global_thresholds(failure_n, recovery_m)
+            except Exception as e:
+                logger.error(f"应用全局阈值到调度器失败: {e}")
+
         n = 0
         if self._alert_engine is not None:
             n = self._alert_engine.reload_channels(self._config)
 
-        msg = f"配置已保存并生效，当前启用通知通道 {n} 个。"
+        msg = (
+            f"配置已保存并生效，当前启用通知通道 {n} 个。\n"
+            f"告警合并摘要：{'开' if notify['digest']['enabled'] else '关'}，"
+            f"窗口 {notify['digest']['window_seconds'] // 60} 分钟，"
+            f"单封最多 {notify['digest']['max_events_per_digest']} 条；\n"
+            f"全局规则：失败阈值 N={failure_n}，恢复阈值 M={recovery_m}，"
+            f"已应用到 {applied_devices} 台设备。"
+        )
         if not saved:
             msg = "配置已更新到内存（未写入文件）。"
         QMessageBox.information(self._widget, "保存配置", msg)
@@ -327,6 +388,25 @@ class AlertConfigPanel:
     def refresh(self):
         """从配置重新填充表单值。"""
         notify = self._config.get('notify', {})
+        monitor = self._config.get('monitor', {})
+        digest = notify.get('digest', {})
+        self._digest_enabled_cb.setChecked(digest.get('enabled', True))
+        self._digest_window_spin.setValue(
+            digest.get('window_seconds', 300) // 60)
+        self._digest_max_spin.setValue(
+            digest.get('max_events_per_digest', 50))
+        self._digest_critical_cb.setChecked(
+            digest.get('send_immediate_if_critical', True))
+        self._rule_n_slider.setValue(
+            monitor.get('default_failure_threshold', 3))
+        self._rule_m_slider.setValue(
+            monitor.get('default_recovery_threshold', 2))
+        self._rule_cooldown_combo.setCurrentIndex(
+            {900: 0, 1800: 1, 3600: 2}.get(
+                notify.get('cooldown_seconds', 1800), 1))
+        self._rule_escalation_combo.setCurrentIndex(
+            {5: 0, 15: 1, 30: 2, 60: 3}.get(
+                notify.get('escalation_minutes', 15), 1))
         for t, entry in self._channels.items():
             cfg = notify.get(t, {})
             entry['enabled'].setChecked(cfg.get('enabled', False))

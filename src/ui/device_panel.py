@@ -129,9 +129,13 @@ class DevicePanelPage:
             self._table.setItem(row, 5, self._item(str(dev.get('check_interval_seconds', 30))))
             # 状态（带颜色）
             status = dev.get('status', 'unknown')
-            if not dev.get('is_enabled'):
+            if dev.get('is_maintenance'):
+                status = '维护中'
+            elif not dev.get('is_enabled'):
                 status = '已禁用'
-            colors = {'online': '#52C41A', 'offline': '#FF4D4F', 'pending_failure': '#FA8C16'}
+            colors = {'online': '#52C41A', 'offline': '#FF4D4F',
+                      'pending_failure': '#FA8C16',
+                      '维护中': '#8C8C8C', '已禁用': '#8C8C8C'}
             status_item = self._item(status)
             # Bug N 修复：Qt.GlobalColor 不接受颜色字符串（'grey'/'#52C41A' 都会抛
             # ValueError），设备面板整表渲染失败。改用 QColor（支持 hex/颜色名）。

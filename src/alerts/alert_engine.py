@@ -51,7 +51,8 @@ class AlertEngine:
         scheduler.register_callback(engine.on_monitor_event)
     """
 
-    def __init__(self, config: dict, alert_repo, channels: list = None):
+    def __init__(self, config: dict, alert_repo, channels: list = None,
+                 device_repo=None):
         """
         初始化告警引擎。
 
@@ -62,6 +63,7 @@ class AlertEngine:
         """
         self._config = config
         self._alert_repo = alert_repo
+        self._device_repo = device_repo
         self._notify_cfg = config.get('notify', {})
 
         # 创建通知通道
@@ -151,11 +153,18 @@ class AlertEngine:
         event_id = self._alert_repo.insert_event(event)
         logger.info(f"离线告警已记录: event_id={event_id}")
 
+        # 设备信息：单设备告警与摘要清单都必须带上名称/IP/系统名
+        dev = self._get_device_info(did)
+
         # 4. 摘要开启 → 缓冲合并；摘要关闭 → 立即发送（Bug J 修复）
         if self._digest_enabled:
             digest_id = self._digest_engine.add_event({
                 'event_id': event_id,
                 'device_id': did,
+                'device_name': dev.get('name', ''),
+                'ip_address': dev.get('ip_address', ''),
+                'subsystem': dev.get('subsystem_name', ''),
+                'subsystem_name': dev.get('subsystem_name', ''),
                 'event_type': 'offline',
                 'occurred_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 'downtime_start': transition.downtime_start,
@@ -169,7 +178,9 @@ class AlertEngine:
         else:
             self._send_immediate(AlertMessage(
                 event_type='offline',
-                device_name=str(did),
+                device_name=dev.get('name') or str(did),
+                ip_address=dev.get('ip_address', ''),
+                subsystem=dev.get('subsystem_name', ''),
                 occurred_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             ), event_id)
 
@@ -207,10 +218,14 @@ class AlertEngine:
         event_id = self._alert_repo.insert_event(event)
         logger.info(f"恢复事件已记录: event_id={event_id}")
 
+        dev = self._get_device_info(did)
+
         # 立即发送恢复通知
         self._send_immediate(AlertMessage(
             event_type='recovery',
-            device_name=str(did),
+            device_name=dev.get('name') or str(did),
+            ip_address=dev.get('ip_address', ''),
+            subsystem=dev.get('subsystem_name', ''),
             occurred_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             extra={'downtime_duration': downtime_duration}
         ), event_id)
@@ -231,10 +246,27 @@ class AlertEngine:
         return self._alert_repo.get_unacknowledged_offline_events()
 
     def reload_channels(self, config: dict):
-        """按最新配置重建通知通道（GUI 保存配置后调用）。"""
+        """
+        按最新配置重建通知通道并刷新告警规则（GUI 保存配置后调用）。
+        合并策略/冷却/升级/重试参数一并热更新，无需重启程序。
+        """
         from ..notify.base_channel import ChannelFactory
+        self._config = config
+        self._notify_cfg = config.get('notify', {})
         self._channels = ChannelFactory.create_all(config)
-        logger.info(f"通知通道已重载：{len(self._channels)} 个")
+        self._digest_engine = DigestEngine(config)
+        self._digest_enabled = self._notify_cfg.get('digest', {}).get('enabled', False)
+        self._cooldown_seconds = self._notify_cfg.get('cooldown_seconds', 1800)
+        self._escalation_minutes = self._notify_cfg.get('escalation_minutes', 15)
+        self._retry_count = self._notify_cfg.get('retry_count', 3)
+        self._retry_backoff = self._notify_cfg.get('retry_backoff_base_seconds', 5)
+        logger.info(
+            f"通知通道已重载：{len(self._channels)} 个，"
+            f"摘要={'开' if self._digest_enabled else '关'} "
+            f"(窗口={self._digest_engine._window_seconds}s, "
+            f"上限={self._digest_engine._max_events_per_digest}), "
+            f"冷却={self._cooldown_seconds}s, 升级={self._escalation_minutes}min"
+        )
         return len(self._channels)
 
     def run_escalation_loop(self):
@@ -273,9 +305,12 @@ class AlertEngine:
                                 state['count'] = state.get('count', 0) + 1
                                 self._escalation_state[eid] = state
 
+                            dev = self._get_device_info(evt.get('device_id', ''))
                             msg = AlertMessage(
                                 event_type='escalation',
-                                device_name=str(evt.get('device_id', '')),
+                                device_name=dev.get('name') or str(evt.get('device_id', '')),
+                                ip_address=dev.get('ip_address', ''),
+                                subsystem=dev.get('subsystem_name', ''),
                                 occurred_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                                 extra={'escalation_minutes': int(elapsed)}
                             )
@@ -310,6 +345,20 @@ class AlertEngine:
 
     # ==================== 内部方法 ====================
 
+    def _get_device_info(self, device_id) -> dict:
+        """
+        查询设备名称/IP/系统名。
+        未注入 device_repo 或查询失败时降级为 ID 占位，保证不阻塞告警流程。
+        """
+        if self._device_repo is not None:
+            try:
+                dev = self._device_repo.get_device(device_id)
+                if dev:
+                    return dev
+            except Exception as e:
+                logger.warning(f"查询设备信息失败 (id={device_id}): {e}")
+        return {'name': str(device_id), 'ip_address': '', 'subsystem_name': ''}
+
     def _send_immediate(self, message: AlertMessage, event_id: int):
         """立即发送单条通知（不经过摘要合并）。"""
         success_count = 0
@@ -334,12 +383,32 @@ class AlertEngine:
         events = batch.events
         event_ids = [e.get('event_id') for e in events if e.get('event_id')]
 
+        # 生成纯文本清单（飞书/企微只渲染字符串字段，邮件用结构化 events）
+        dev_lines = []
+        for e in events:
+            name = e.get('device_name') or f"#{e.get('device_id', '')}"
+            ip = e.get('ip_address') or '-'
+            subsys = e.get('subsystem') or e.get('subsystem_name') or '未分组'
+            occurred = e.get('occurred_at', '')
+            dev_lines.append(f"- {name} ({ip}) [{subsys}] {occurred}".rstrip())
+
+        subsys_set = {
+            e.get('subsystem') or e.get('subsystem_name') or '未分组'
+            for e in events
+        }
         msg = AlertMessage(
             event_type='digest',
             device_name=f"{len(events)} 台设备离线",
-            message=f"时间窗口内 {len(events)} 台设备离线，涉及多个子系统",
+            message=(
+                f"时间窗口内 {len(events)} 台设备离线，涉及 "
+                f"{len(subsys_set)} 个子系统"
+            ),
             occurred_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            extra={'events': events, 'digest_id': batch.digest_id}
+            extra={
+                'events': events,
+                'digest_id': batch.digest_id,
+                '离线设备清单': '\n'.join(dev_lines),
+            }
         )
 
         success_count = 0

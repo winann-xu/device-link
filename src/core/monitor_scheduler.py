@@ -215,6 +215,18 @@ class MonitorScheduler:
         self._schedule.pop(device_id, None)
         self._status_cache.pop(device_id, None)
 
+    def apply_global_thresholds(self, failure_threshold: int = None,
+                                recovery_threshold: int = None):
+        """
+        将全局告警规则（失败阈值 N / 恢复阈值 M）热更新到所有运行中的状态机。
+        """
+        updated = 0
+        for machine in self._machines.values():
+            machine.set_thresholds(failure_threshold, recovery_threshold)
+            updated += 1
+        logger.info(f"全局阈值已应用到 {updated} 台设备")
+        return updated
+
     def _main_loop(self):
         """
         调度主循环（每秒 tick 一次）。

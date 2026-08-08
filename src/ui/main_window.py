@@ -144,6 +144,8 @@ class MainWindow:
                 config, alert_repo,
                 alert_engine=getattr(self, '_alert_engine', None),
                 config_path=getattr(self, '_config_path', None),
+                device_repo=device_repo,
+                scheduler=scheduler,
             )
             self._stack.addWidget(self._alert_config_panel._widget)
             self._pages.append(self._alert_config_panel)

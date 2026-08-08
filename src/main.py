@@ -192,7 +192,7 @@ def main():
     scheduler = MonitorScheduler(devices, config, device_repo, history_repo)
 
     # 7. 启动告警引擎
-    alert_engine = AlertEngine(config, alert_repo)
+    alert_engine = AlertEngine(config, alert_repo, device_repo=device_repo)
     scheduler.register_callback(alert_engine.on_monitor_event)
     alert_engine.run_escalation_loop()
 

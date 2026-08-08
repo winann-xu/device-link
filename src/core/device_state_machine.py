@@ -253,6 +253,25 @@ class DeviceStateMachine:
         self._is_maintenance = False
         logger.info(f"[{self._device_name}] 退出维护模式")
 
+    def set_thresholds(self, failure_threshold: int = None,
+                       recovery_threshold: int = None):
+        """
+        更新告警阈值（GUI 保存"全局告警规则"后热更新运行中的状态机）。
+
+        参数:
+            failure_threshold: 失败判定阈值 N（>=1）
+            recovery_threshold: 恢复判定阈值 M（>=1）
+        """
+        with self._lock:
+            if failure_threshold is not None:
+                self._failure_threshold = max(1, int(failure_threshold))
+            if recovery_threshold is not None:
+                self._recovery_threshold = max(1, int(recovery_threshold))
+        logger.info(
+            f"[{self._device_name}] 全局阈值更新: N={self._failure_threshold}, "
+            f"M={self._recovery_threshold}"
+        )
+
     def _make_transition(self, old_status: DeviceStatus,
                           event_type: Optional[str] = None,
                           downtime_start: Optional[str] = None) -> StateTransition:

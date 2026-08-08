@@ -129,7 +129,15 @@ def create_zip_package():
         print("未找到 exe 文件，跳过 zip 打包")
         return
 
-    version = "1.0.2"
+    # 版本号从默认配置读取，避免打包时手动同步
+    version = "1.0.0"
+    try:
+        import yaml
+        with open(ROOT / 'config' / 'default_config.yaml', encoding='utf-8') as f:
+            _cfg = yaml.safe_load(f) or {}
+        version = str(_cfg.get('app', {}).get('version', '1.0.0'))
+    except Exception:
+        pass
     zip_name = f"DEVICE-LINK-v{version}.zip"
     zip_path = DIST / zip_name
 

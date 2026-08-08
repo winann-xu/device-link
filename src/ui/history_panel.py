@@ -51,17 +51,18 @@ class HistoryPanel:
         top_bar.addWidget(QLabel("设备:"))
         top_bar.addWidget(self._device_combo)
 
+        # 时间范围选择器：控制离线排行榜统计周期（默认 7 天）
+        self._period = 'week'
+        self._time_buttons = {}
         time_btns = [
             ('今天', 'day'), ('7天', 'week'), ('30天', 'month')
         ]
         for label, period in time_btns:
             btn = QPushButton(label)
-            btn.setStyleSheet("""
-                QPushButton { background: white; border: 1px solid #d9d9d9;
-                              padding: 6px 16px; border-radius: 4px; }
-                QPushButton:hover { border-color: #1890FF; }
-            """)
+            btn.setCheckable(True)
+            btn.setStyleSheet(self._time_btn_style(period == self._period))
             btn.clicked.connect(lambda checked=False, p=period: self._on_time_range(p))
+            self._time_buttons[period] = btn
             top_bar.addWidget(btn)
 
         top_bar.addStretch()
@@ -83,9 +84,9 @@ class HistoryPanel:
         layout.addLayout(cards_layout)
 
         # === 离线排行榜 ===
-        rank_label = QLabel("📉 离线时长排行榜 (最近 7 天)")
-        rank_label.setFont(QFont('Microsoft YaHei', 14, QFont.Bold))
-        layout.addWidget(rank_label)
+        self._toplist_label = QLabel("📉 离线时长排行榜 (最近 7 天)")
+        self._toplist_label.setFont(QFont('Microsoft YaHei', 14, QFont.Bold))
+        layout.addWidget(self._toplist_label)
 
         self._toplist_table = QTableWidget()
         self._toplist_table.setColumnCount(5)
@@ -110,6 +111,23 @@ class HistoryPanel:
         self._alert_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
         self._alert_table.setStyleSheet("background: white; border: 1px solid #e8e8e8; border-radius: 4px;")
         layout.addWidget(self._alert_table, 1)
+
+    def _time_btn_style(self, active: bool) -> str:
+        """时间范围按钮样式：选中高亮，避免全局 QSS 白字白底。"""
+        if active:
+            return """
+                QPushButton {
+                    background: #1890FF; color: white; border: none;
+                    padding: 6px 16px; border-radius: 4px; font-size: 13px;
+                }
+            """
+        return """
+            QPushButton {
+                background: white; color: #333; border: 1px solid #d9d9d9;
+                padding: 6px 16px; border-radius: 4px; font-size: 13px;
+            }
+            QPushButton:hover { border-color: #1890FF; color: #1890FF; }
+        """
 
     def _create_stat_card(self, title: str, value: str) -> QFrame:
         """创建统计卡片。"""
@@ -142,7 +160,11 @@ class HistoryPanel:
         return card
 
     def _on_time_range(self, period: str):
-        """时间范围切换。"""
+        """时间范围切换：更新选中态并刷新统计。"""
+        self._period = period
+        for p, btn in self._time_buttons.items():
+            btn.setChecked(p == period)
+            btn.setStyleSheet(self._time_btn_style(p == period))
         self.refresh()
 
     def refresh(self):
@@ -186,8 +208,12 @@ class HistoryPanel:
                 except Exception as e:
                     logger.error(f"在线率统计失败({period}): {e}")
 
-            # 离线排行榜
-            toplist = self._history_repo.get_offline_toplist(7, 10)
+            # 离线排行榜（周期跟随时间范围按钮）
+            days_map = {'day': 1, 'week': 7, 'month': 30}
+            days = days_map.get(self._period, 7)
+            self._toplist_label.setText(
+                f"📉 离线时长排行榜 (最近 {days} 天)")
+            toplist = self._history_repo.get_offline_toplist(days, 10)
             self._toplist_table.setRowCount(len(toplist))
             for i, item in enumerate(toplist):
                 from PySide6.QtWidgets import QTableWidgetItem
