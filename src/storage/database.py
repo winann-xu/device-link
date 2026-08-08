@@ -60,6 +60,9 @@ CREATE TABLE IF NOT EXISTS devices (
     created_at TEXT DEFAULT (datetime('now','localtime')),
     updated_at TEXT DEFAULT (datetime('now','localtime'))
 );
+-- 设备名唯一约束（防止同名设备混入，GUI 已有友好提示，需约束到位）
+-- 用 CREATE UNIQUE INDEX IF NOT EXISTS 而非 ALTER TABLE，避免旧库已有重名时报错中断
+CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_name_unique ON devices(name);
 
 -- 状态历史表（在线率统计核心）
 CREATE TABLE IF NOT EXISTS status_history (

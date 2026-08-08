@@ -113,8 +113,7 @@ class WatchdogProcess:
                 result = subprocess.run(
                     ['tasklist', '/FI', f'PID eq {pid}', '/NH'],
                     capture_output=True, text=True, timeout=5,
-                    # Bug S 修复：GUI 程序（无控制台）直接 spawn 控制台子进程会
-                    # 每 15 秒弹出一个黑色终端窗口，必须加 CREATE_NO_WINDOW
+                    # 重新应用修复：GUI 程序（无控制台）spawn 控制台子进程会弹黑色终端框
                     creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
                 )
                 return str(pid) in result.stdout

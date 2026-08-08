@@ -57,8 +57,8 @@ class HistoryPanel:
         for label, period in time_btns:
             btn = QPushButton(label)
             btn.setStyleSheet("""
-                QPushButton { background: white; color: #333; border: 1px solid #d9d9d9;
-                              border-radius: 4px; }
+                QPushButton { background: white; border: 1px solid #d9d9d9;
+                              padding: 6px 16px; border-radius: 4px; }
                 QPushButton:hover { border-color: #1890FF; }
             """)
             btn.clicked.connect(lambda checked=False, p=period: self._on_time_range(p))
