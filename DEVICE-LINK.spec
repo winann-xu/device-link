@@ -5,7 +5,8 @@ a = Analysis(
     ['src/main.py'],
     pathex=[],
     binaries=[],
-    datas=[('config', 'config'), ('assets', 'assets')],
+    # 只打包默认配置模板，不打本地生成的 config.yaml（避免把开发机配置带入新环境）
+    datas=[('config/default_config.yaml', 'config'), ('assets', 'assets')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

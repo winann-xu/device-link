@@ -28,6 +28,9 @@ if getattr(sys, 'frozen', False):
         if _src.is_dir():
             _dst.mkdir(parents=True, exist_ok=True)
             for _f in _src.iterdir():
+                # 不复制本地生成的 config.yaml（开发机配置不带入新环境）
+                if _sub == 'config' and _f.name == 'config.yaml':
+                    continue
                 _target = _dst / _f.name
                 if not _target.exists():
                     try:
