@@ -2,10 +2,10 @@
 
 
 a = Analysis(
-    ['C:\\Users\\Public\\bridge\\work\\device-link\\src\\main.py'],
+    ['src/main.py'],
     pathex=[],
     binaries=[],
-    datas=[('C:\\Users\\Public\\bridge\\work\\device-link\\config', 'config'), ('C:\\Users\\Public\\bridge\\work\\device-link\\assets', 'assets')],
+    datas=[('config', 'config'), ('assets', 'assets')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
