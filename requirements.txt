@@ -1,0 +1,13 @@
+PySide6>=6.5,<7
+ping3>=4.0
+requests>=2.31
+pyyaml>=6.0
+cryptography>=41.0
+nuitka>=1.9
+pyinstaller>=5.13
+pytest>=7.4
+pytest-cov>=4.1
+pytest-mock>=3.11
+aiosmtpd>=1.4
+watchdog>=3.0
+pillow>=10.0

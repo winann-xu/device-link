@@ -1,0 +1,64 @@
+# 运行数据
+data/
+logs/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# 构建产物
+dist/
+build/*
+!build/packaging.py
+*.spec.bak
+
+# 本地生成配置（可能含加密凭据）
+config/config.yaml
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+.mypy_cache/
+venv/
+
+# 测试/调试产物（根目录散落）
+*.png
+ctrl-*.txt
+build*.log
+build*.err
+gui*.log
+gui-test*.log
+*.log
+debug-*
+soak-*
+flash-*
+win-*
+btn-*
+cb-*
+b-*
+t-*.png
+v-*.png
+i*.png
+j*.png
+g-*.png
+single-card.png
+fixed-card.png
+crop-card1.png
+alerts-before.png
+devpanel-check.png
+screen-check.png
+history-*.png
+gui-debug.png
+gui-shot1.png
+device-link-log.txt
+device-link-state.json
+frozen_probe.py
+
+# 内部协作文档
+DEVICE-LINK-CODEX-PROMPT.md
+CODEX-TESTER.md
+env-setup*.log
+uv-setup.log
