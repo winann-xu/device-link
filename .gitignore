@@ -16,6 +16,7 @@ logs/
 .coverage
 htmlcov/
 dist/
+DEVICE-LINK.exe_extracted/
 
 # ---- 本地生成配置（可能含加密凭据）----
 config/config.yaml
