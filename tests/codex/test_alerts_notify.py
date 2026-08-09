@@ -133,8 +133,60 @@ def test_feishu_payload(monkeypatch):
     assert r.success is True
     payload = captured["json"]
     assert payload["msg_type"] == "interactive"
-    assert payload["card"]["header"]["template"] == "red"
-    assert "网关-1" in payload["card"]["elements"][0]["text"]["content"]
+    card = payload["card"]
+    # 飞书卡片 JSON 2.0：schema 声明 + body.elements，组件为 markdown/hr
+    assert card["schema"] == "2.0"
+    assert card["header"]["template"] == "red"
+    assert card["header"]["title"]["content"] == "设备离线告警"
+    elements = card["body"]["elements"]
+    assert elements[0]["tag"] == "markdown"
+    assert "网关-1" in elements[0]["content"]
+    assert "192.168.50.1" in elements[0]["content"]
+    tags = {e["tag"] for e in elements}
+    assert tags == {"markdown", "hr"}
+
+
+def test_feishu_digest_payload(monkeypatch):
+    captured = {}
+
+    class FakeResp:
+        status_code = 200
+
+        def json(self):
+            return {"code": 0}
+
+    class FakeSession:
+        def post(self, url, json=None, timeout=None, **kwargs):
+            captured["json"] = json
+            return FakeResp()
+
+    ch = FeishuChannel({"webhook_url": "https://open.feishu.cn/hook/xxx"})
+    monkeypatch.setattr(ch, "_session", FakeSession())
+    msg = AlertMessage(
+        event_type="digest",
+        device_name="3 台设备离线",
+        ip_address="",
+        subsystem="",
+        message="时间窗口内 3 台设备离线，涉及 2 个子系统",
+        occurred_at="2026-08-09 12:00:00",
+        extra={
+            "离线设备清单": "- 网关-1 (192.168.50.1) [MES]\n- 路由器-2 (192.168.50.2) [SCADA]\n- 服务器-3 (192.168.50.3) [MES]",
+            "digest_id": 7,
+            "events": [],
+        },
+    )
+    r = ch.send(msg)
+    assert r.success is True
+    payload = captured["json"]
+    card = payload["card"]
+    assert card["schema"] == "2.0"
+    assert card["header"]["template"] == "blue"
+    elements = card["body"]["elements"]
+    # 摘要清单必须作为 markdown 内容块完整携带，而非被忽略
+    all_content = "\n".join(e.get("content", "") for e in elements if e.get("tag") == "markdown")
+    assert "3 台设备离线" in all_content
+    assert "网关-1 (192.168.50.1) [MES]" in all_content
+    assert "服务器-3 (192.168.50.3) [MES]" in all_content
 
 
 def test_wecom_payload_and_errcode(monkeypatch):

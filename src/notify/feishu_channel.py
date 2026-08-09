@@ -4,13 +4,15 @@
      发送 interactive 卡片消息到飞书群。
      支持离线告警(红)、恢复通知(绿)、升级通知(橙)、摘要(蓝)四种卡片模板。
 
+卡片结构：飞书卡片 JSON 2.0（schema="2.0"，正文放在 body.elements），
+         与自定义机器人官方文档示例一致。
+
 API 文档：https://open.feishu.cn/document/ukTMukTMukTM/ucTM5YjL3ETO24yNxkjN
 
 作者：Claude
 创建日期：2026-08-07
 """
 import time
-import json
 import logging
 
 import requests
@@ -48,13 +50,8 @@ class FeishuChannel(BaseNotificationChannel):
             message='DEVICE LINK 飞书通知通道测试',
             occurred_at=time.strftime('%Y-%m-%d %H:%M:%S'),
         )
-        # 测试消息用简单文本格式
-        return self._send_text("DEVICE LINK 飞书通知通道测试通过 ✅")
-        # fallback: 如果 webhook 不支持 text，尝试用 send() 的卡片格式
-        result = self._send_text("DEVICE LINK 飞书通知通道测试通过 ✅")
-        if not result.success:
-            return self.send(msg)
-        return result
+        # 测试必须走真实告警同款卡片路径，否则纯文本通过会掩盖卡片格式问题
+        return self.send(msg)
 
     def send(self, message: AlertMessage) -> SendResult:
         """
@@ -65,6 +62,8 @@ class FeishuChannel(BaseNotificationChannel):
           recovery → green
           escalation → orange
           digest → blue
+        卡片使用 JSON 2.0 结构：schema="2.0" + body.elements，
+        内容块为 markdown（支持换行/加粗/彩色文本），分隔线用 hr。
         """
         t0 = time.monotonic()
         try:
@@ -85,47 +84,52 @@ class FeishuChannel(BaseNotificationChannel):
             }
             title = titles.get(message.event_type, '通知')
 
-            # 构建 extra 内容
-            extra_fields = []
-            for k, v in message.extra.items():
-                if isinstance(v, str):
-                    extra_fields.append({
-                        "is_short": True,
-                        "text": {"tag": "lark_md", "content": f"**{k}**\n{v}"}
-                    })
+            # 构建 extra 内容（JSON 2.0 富文本 markdown 块）
+            extra_fields = [
+                {
+                    "tag": "markdown",
+                    "content": f"**{k}**\n{v}",
+                }
+                for k, v in message.extra.items()
+                if isinstance(v, str)
+            ]
 
             payload = {
                 "msg_type": "interactive",
                 "card": {
+                    "schema": "2.0",
+                    "config": {
+                        "update_multi": True,
+                        "enable_forward": False,
+                    },
                     "header": {
                         "title": {"tag": "plain_text", "content": title},
                         "template": color
                     },
-                    "elements": [
-                        {
-                            "tag": "div",
-                            "text": {
-                                "tag": "lark_md",
+                    "body": {
+                        "direction": "vertical",
+                        "elements": [
+                            {
+                                "tag": "markdown",
                                 "content": (
                                     f"**设备：**{message.device_name}\n"
                                     f"**IP：**{message.ip_address}\n"
                                     f"**子系统：**{message.subsystem}\n"
                                     f"**时间：**{message.occurred_at}\n"
                                     f"**详情：**{message.message}"
-                                )
-                            }
-                        },
-                        *extra_fields,
-                        {
-                            "tag": "hr"
-                        },
-                        {
-                            "tag": "note",
-                            "elements": [
-                                {"tag": "plain_text", "content": "DEVICE LINK 自动发送"}
-                            ]
-                        }
-                    ]
+                                ),
+                            },
+                            *extra_fields,
+                            {
+                                "tag": "hr",
+                            },
+                            {
+                                "tag": "markdown",
+                                "content": "DEVICE LINK 自动发送",
+                                "text_size": "small",
+                            },
+                        ],
+                    },
                 }
             }
 
