@@ -107,6 +107,11 @@ class AlertEngine:
             f"升级={'开' if self._escalation_enabled else '关'}"
             f"({self._escalation_minutes}min, 每事件最多{self._escalation_max_count}次)"
         )
+        if not self._channels:
+            logger.warning(
+                "告警引擎当前无启用通知通道，真实告警不会发送到任何渠道。"
+                "请在『告警与通知配置』勾选启用通道并点击『保存配置』。"
+            )
 
     def on_monitor_event(self, transition: StateTransition):
         """

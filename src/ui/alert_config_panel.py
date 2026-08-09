@@ -266,9 +266,15 @@ class AlertConfigPanel:
 
         res = ch.test()
         if res.success:
+            msg = f"✅ {channel_type} 测试发送成功（{res.latency_ms:.0f} ms）"
+            if not cfg.get('enabled'):
+                msg += (
+                    "\n\n⚠️ 该通道未勾选『启用』，真实告警不会发送。"
+                    "请勾选启用后点击『保存配置』。"
+                )
             QMessageBox.information(
                 self._widget, "测试结果",
-                f"✅ {channel_type} 测试发送成功（{res.latency_ms:.0f} ms）",
+                msg,
             )
         else:
             QMessageBox.critical(
