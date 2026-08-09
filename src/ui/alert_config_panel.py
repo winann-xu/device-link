@@ -137,10 +137,12 @@ class AlertConfigPanel:
 
         self._rule_escalation_combo = QComboBox()
         self._rule_escalation_combo.addItems(
-            ['5 分钟', '15 分钟', '30 分钟', '60 分钟'])
+            ['关闭', '5 分钟', '15 分钟', '30 分钟', '60 分钟'])
         escalation_minutes = notify_cfg.get('escalation_minutes', 15)
+        escalation_enabled = notify_cfg.get('escalation_enabled', True)
         self._rule_escalation_combo.setCurrentIndex(
-            {5: 0, 15: 1, 30: 2, 60: 3}.get(escalation_minutes, 1))
+            0 if not escalation_enabled else
+            {5: 1, 15: 2, 30: 3, 60: 4}.get(escalation_minutes, 2))
         rlayout.addRow("升级时间:", self._rule_escalation_combo)
 
         clayout.addWidget(rule_group)
@@ -296,9 +298,15 @@ class AlertConfigPanel:
         notify['cooldown_seconds'] = {
             '15 分钟': 900, '30 分钟': 1800, '60 分钟': 3600
         }.get(self._rule_cooldown_combo.currentText(), 1800)
-        notify['escalation_minutes'] = {
-            '5 分钟': 5, '15 分钟': 15, '30 分钟': 30, '60 分钟': 60
-        }.get(self._rule_escalation_combo.currentText(), 15)
+        escalation_text = self._rule_escalation_combo.currentText()
+        if escalation_text == '关闭':
+            notify['escalation_enabled'] = False
+            notify['escalation_minutes'] = 15
+        else:
+            notify['escalation_enabled'] = True
+            notify['escalation_minutes'] = {
+                '5 分钟': 5, '15 分钟': 15, '30 分钟': 30, '60 分钟': 60
+            }.get(escalation_text, 15)
         # 全局失败/恢复阈值
         failure_n = self._rule_n_slider.value()
         recovery_m = self._rule_m_slider.value()
@@ -342,11 +350,14 @@ class AlertConfigPanel:
         if self._alert_engine is not None:
             n = self._alert_engine.reload_channels(self._config)
 
+        esc_desc = '关闭' if not notify.get('escalation_enabled', True) else \
+            f'开启（{notify.get("escalation_minutes", 15)} 分钟，每事件最多 3 次）'
         msg = (
             f"配置已保存并生效，当前启用通知通道 {n} 个。\n"
             f"告警合并摘要：{'开' if notify['digest']['enabled'] else '关'}，"
             f"窗口 {notify['digest']['window_seconds'] // 60} 分钟，"
             f"单封最多 {notify['digest']['max_events_per_digest']} 条；\n"
+            f"告警升级：{esc_desc}；\n"
             f"全局规则：失败阈值 N={failure_n}，恢复阈值 M={recovery_m}，"
             f"已应用到 {applied_devices} 台设备。"
         )
@@ -404,9 +415,11 @@ class AlertConfigPanel:
         self._rule_cooldown_combo.setCurrentIndex(
             {900: 0, 1800: 1, 3600: 2}.get(
                 notify.get('cooldown_seconds', 1800), 1))
+        esc_enabled = notify.get('escalation_enabled', True)
         self._rule_escalation_combo.setCurrentIndex(
-            {5: 0, 15: 1, 30: 2, 60: 3}.get(
-                notify.get('escalation_minutes', 15), 1))
+            0 if not esc_enabled else
+            {5: 1, 15: 2, 30: 3, 60: 4}.get(
+                notify.get('escalation_minutes', 15), 2))
         for t, entry in self._channels.items():
             cfg = notify.get(t, {})
             entry['enabled'].setChecked(cfg.get('enabled', False))

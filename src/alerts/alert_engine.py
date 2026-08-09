@@ -83,6 +83,9 @@ class AlertEngine:
         # 升级状态：event_id → {'escalated_at': ..., 'count': ...}
         self._escalation_state: dict[int, dict] = {}
         self._escalation_minutes = self._notify_cfg.get('escalation_minutes', 15)
+        # 升级开关与每事件升级次数上限（修复：升级邮件无限重复轰炸）
+        self._escalation_enabled = self._notify_cfg.get('escalation_enabled', True)
+        self._escalation_max_count = self._notify_cfg.get('escalation_max_count', 3)
 
         # 重试配置
         self._retry_count = self._notify_cfg.get('retry_count', 3)
@@ -100,7 +103,9 @@ class AlertEngine:
 
         logger.info(
             f"告警引擎初始化：{len(self._channels)} 个通知通道, "
-            f"冷却={self._cooldown_seconds}s, 升级={self._escalation_minutes}min"
+            f"冷却={self._cooldown_seconds}s, "
+            f"升级={'开' if self._escalation_enabled else '关'}"
+            f"({self._escalation_minutes}min, 每事件最多{self._escalation_max_count}次)"
         )
 
     def on_monitor_event(self, transition: StateTransition):
@@ -258,6 +263,8 @@ class AlertEngine:
         self._digest_enabled = self._notify_cfg.get('digest', {}).get('enabled', False)
         self._cooldown_seconds = self._notify_cfg.get('cooldown_seconds', 1800)
         self._escalation_minutes = self._notify_cfg.get('escalation_minutes', 15)
+        self._escalation_enabled = self._notify_cfg.get('escalation_enabled', True)
+        self._escalation_max_count = self._notify_cfg.get('escalation_max_count', 3)
         self._retry_count = self._notify_cfg.get('retry_count', 3)
         self._retry_backoff = self._notify_cfg.get('retry_backoff_base_seconds', 5)
         logger.info(
@@ -265,7 +272,9 @@ class AlertEngine:
             f"摘要={'开' if self._digest_enabled else '关'} "
             f"(窗口={self._digest_engine._window_seconds}s, "
             f"上限={self._digest_engine._max_events_per_digest}), "
-            f"冷却={self._cooldown_seconds}s, 升级={self._escalation_minutes}min"
+            f"冷却={self._cooldown_seconds}s, "
+            f"升级={'开' if self._escalation_enabled else '关'}"
+            f"({self._escalation_minutes}min, 每事件最多{self._escalation_max_count}次)"
         )
         return len(self._channels)
 
@@ -278,9 +287,12 @@ class AlertEngine:
             return
 
         def _loop():
-            while True:
+            while self._running:
                 time.sleep(60)
                 try:
+                    # 升级总开关：关闭后不再扫描发送（仍保留线程，避免重启）
+                    if not self._escalation_enabled:
+                        continue
                     unacked = self._alert_repo.get_unacknowledged_offline_events()
                     for evt in unacked:
                         eid = evt['id']
@@ -300,6 +312,9 @@ class AlertEngine:
                                 })
                                 # 30 分钟内最多升级 1 次
                                 if time.time() - state.get('escalated_at', 0) < 1800:
+                                    continue
+                                # 每事件升级次数上限：达到后不再发送，避免无限轰炸
+                                if state.get('count', 0) >= self._escalation_max_count:
                                     continue
                                 state['escalated_at'] = time.time()
                                 state['count'] = state.get('count', 0) + 1

@@ -236,3 +236,115 @@ class TestDashboardStatusResolution:
         assert resolve_device_status(dev, "pending_failure") == "pending_failure"
         assert resolve_device_status(dev, "") == "unknown"
 
+
+class TestEscalationControl:
+    """升级风暴修复：总开关可关闭 + 每事件升级次数上限。"""
+
+    @staticmethod
+    def _insert_old_event(env, alert, did):
+        eid = alert.insert_event({
+            "device_id": did, "event_type": "offline", "message": "设备离线告警",
+            "notified_channels": "", "notify_success": 0,
+        })
+        env.execute(
+            "UPDATE alert_events SET created_at='2026-08-08 00:00:00' WHERE id=?",
+            (eid,))
+        env.commit()
+        return eid
+
+    def test_escalation_disabled_sends_nothing(self, env, monkeypatch):
+        import src.alerts.alert_engine as aem
+        from src.storage.repositories import DeviceRepository
+        repo = DeviceRepository(env)
+        alert = AlertRepository(env)
+        did = _add_device(repo, "升级关设备", "10.9.9.1", "测试")
+        self._insert_old_event(env, alert, did)
+
+        class Ch:
+            def __init__(self):
+                self.sent = []
+
+            def get_channel_name(self):
+                return "cap"
+
+            def send(self, message):
+                self.sent.append(message)
+                return SendResult(success=True, channel="cap")
+
+        ch = Ch()
+        cfg = base_cfg(**{
+            "escalation_enabled": False, "escalation_minutes": 1,
+            "escalation_max_count": 3,
+            "digest": {"enabled": False, "window_seconds": 60,
+                       "max_events_per_digest": 50,
+                       "send_immediate_if_critical": False},
+        })
+        ae = AlertEngine(cfg, alert, channels=[ch], device_repo=repo)
+        monkeypatch.setattr(aem.time, "sleep", lambda s: 0.01)
+        ae.run_escalation_loop()
+        deadline = time.time() + 5
+        while time.time() < deadline and not ch.sent:
+            time.sleep(0.1)
+        ae._running = False
+        assert ch.sent == [], "升级关闭后不应发送任何升级邮件"
+
+    def test_escalation_capped_at_max_count(self, env, monkeypatch):
+        import src.alerts.alert_engine as aem
+        from src.storage.repositories import DeviceRepository
+        repo = DeviceRepository(env)
+        alert = AlertRepository(env)
+        did = _add_device(repo, "升级限次设备", "10.9.9.2", "测试")
+        self._insert_old_event(env, alert, did)
+
+        class Ch:
+            def __init__(self):
+                self.sent = []
+
+            def get_channel_name(self):
+                return "cap"
+
+            def send(self, message):
+                if message.event_type == "escalation":
+                    self.sent.append(message)
+                return SendResult(success=True, channel="cap")
+
+        ch = Ch()
+        cfg = base_cfg(**{
+            "escalation_enabled": True, "escalation_minutes": 1,
+            "escalation_max_count": 2,
+            "digest": {"enabled": False, "window_seconds": 60,
+                       "max_events_per_digest": 50,
+                       "send_immediate_if_critical": False},
+        })
+        ae = AlertEngine(cfg, alert, channels=[ch], device_repo=repo)
+        monkeypatch.setattr(aem.time, "sleep", lambda s: 0.01)
+
+        class FakeClock:
+            def __init__(self):
+                self.t = 1000000.0
+
+            def __call__(self):
+                return self.t
+
+        clock = FakeClock()
+        monkeypatch.setattr(aem.time, "time", clock)
+        ae.run_escalation_loop()
+
+        # 第一次升级
+        deadline = time.time() + 5
+        while time.time() < deadline and len(ch.sent) < 1:
+            time.sleep(0.1)
+        assert len(ch.sent) == 1
+
+        # 推进 30 分钟，触发第二次升级
+        clock.t += 1801
+        deadline = time.time() + 5
+        while time.time() < deadline and len(ch.sent) < 2:
+            time.sleep(0.1)
+        assert len(ch.sent) == 2
+
+        # 再推进 30 分钟：已达上限，不得发第三次
+        clock.t += 1801
+        time.sleep(1.5)
+        ae._running = False
+        assert len(ch.sent) == 2, f"每事件升级上限=2，实际 {len(ch.sent)}"

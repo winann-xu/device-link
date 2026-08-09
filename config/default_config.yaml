@@ -6,7 +6,7 @@
 
 app:
   name: "DEVICE LINK"
-  version: "1.0.3"
+  version: "1.0.4"
   language: "zh-CN"
   start_minimized: true
   minimize_to_tray: true
@@ -51,7 +51,9 @@ notify:
   retry_count: 3
   retry_backoff_base_seconds: 5
   cooldown_seconds: 1800
+  escalation_enabled: true
   escalation_minutes: 15
+  escalation_max_count: 3
   escalation_channels: ["all"]
 
 storage:
