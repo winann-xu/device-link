@@ -154,6 +154,10 @@ def create_zip_package():
             for asset in assets_dir.iterdir():
                 if asset.is_file():
                     zf.write(asset, f'DEVICE-LINK-v{version}/assets/{asset.name}')
+        # 用户手册随包分发（修复：此前只复制到 dist/ 目录，zip 内没有）
+        manual = ROOT / 'docs' / 'user_manual.md'
+        if manual.exists():
+            zf.write(manual, f'DEVICE-LINK-v{version}/使用手册.md')
         # 空目录占位
         zf.writestr(f'DEVICE-LINK-v{version}/config/.gitkeep', '')
         zf.writestr(f'DEVICE-LINK-v{version}/data/.gitkeep', '')

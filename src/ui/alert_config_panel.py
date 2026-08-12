@@ -101,6 +101,23 @@ class AlertConfigPanel:
             digest_cfg.get('send_immediate_if_critical', True))
         dlayout.addRow("紧急绕过（同子系统≥5台立即发送）:", self._digest_critical_cb)
 
+        # 每日离线报告（v1.0.9）：每天 08:00 发送当前离线设备清单
+        daily_cfg = notify_cfg.get('daily_report', {})
+        self._daily_report_cb = QCheckBox()
+        self._daily_report_cb.setChecked(daily_cfg.get('enabled', False))
+        dlayout.addRow("每日 08:00 发送离线设备清单:", self._daily_report_cb)
+
+        daily_hint = QLabel(
+            "说明：每天 08:00 定时发送一封「当前离线设备清单」邮件；\n"
+            "      当天离线设备数量为 0 时不发送；仅统计离线设备，\n"
+            "      待定（pending_failure）与维护中设备均不计入。"
+        )
+        daily_hint.setStyleSheet(
+            "color: #999; font-size: 12px; padding: 4px 0 8px 0;"
+        )
+        daily_hint.setWordWrap(True)
+        dlayout.addRow("", daily_hint)
+
         clayout.addWidget(digest_group)
 
         # === 全局告警规则 ===
@@ -300,6 +317,11 @@ class AlertConfigPanel:
             'max_events_per_digest': self._digest_max_spin.value(),
             'send_immediate_if_critical': self._digest_critical_cb.isChecked(),
         }
+        # 每日离线报告（保留已有 send_time，默认 08:00）
+        notify['daily_report'] = {
+            'enabled': self._daily_report_cb.isChecked(),
+            'send_time': notify.get('daily_report', {}).get('send_time', '08:00'),
+        }
         # 冷却/升级
         notify['cooldown_seconds'] = {
             '15 分钟': 900, '30 分钟': 1800, '60 分钟': 3600
@@ -362,6 +384,7 @@ class AlertConfigPanel:
             f"告警合并摘要：{'开' if notify['digest']['enabled'] else '关'}，"
             f"窗口 {notify['digest']['window_seconds'] // 60} 分钟，"
             f"单封最多 {notify['digest']['max_events_per_digest']} 条；\n"
+            f"每日离线清单：{'开（每天 08:00）' if notify['daily_report']['enabled'] else '关'}；\n"
             f"告警升级：{esc_desc}；\n"
             f"全局规则：失败阈值 N={failure_n}，恢复阈值 M={recovery_m}，"
             f"已应用到 {applied_devices} 台设备。"
@@ -413,6 +436,8 @@ class AlertConfigPanel:
             digest.get('max_events_per_digest', 50))
         self._digest_critical_cb.setChecked(
             digest.get('send_immediate_if_critical', True))
+        daily = notify.get('daily_report', {})
+        self._daily_report_cb.setChecked(daily.get('enabled', False))
         self._rule_n_slider.setValue(
             monitor.get('default_failure_threshold', 3))
         self._rule_m_slider.setValue(

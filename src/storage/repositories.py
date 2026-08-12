@@ -319,6 +319,24 @@ class DeviceRepository:
         """返回所有已启用且非维护模式的设备列表。"""
         return self.list_devices(enabled_only=True)
 
+    def list_current_offline_devices(self) -> list:
+        """返回当前离线设备（每日离线报告用）。
+
+        统计口径：仅 devices.status='offline' 且启用、非维护的设备；
+        pending_failure（待定）与 maintenance（维护中）均不计入。
+
+        返回:
+            离线设备字典列表（按子系统、名称排序）
+        """
+        rows = self._conn.execute(
+            """SELECT id, name, ip_address, subsystem_name, status,
+                      last_check_time, last_downtime_start, latency_ms
+               FROM devices
+               WHERE status='offline' AND is_enabled=1 AND is_maintenance=0
+               ORDER BY subsystem_name, name"""
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     # ==================== 状态更新 ====================
 
     def set_device_status(self, device_id: int, status: str, failure_count: int,

@@ -72,6 +72,7 @@ class FeishuChannel(BaseNotificationChannel):
                 'recovery': 'green',
                 'escalation': 'orange',
                 'digest': 'blue',
+                'daily_report': 'blue',
                 'test': 'blue',
             }
             color = colors.get(message.event_type, 'blue')
@@ -80,6 +81,7 @@ class FeishuChannel(BaseNotificationChannel):
                 'recovery': '设备恢复通知',
                 'escalation': '告警升级通知',
                 'digest': '告警合并摘要',
+                'daily_report': '每日离线设备清单',
                 'test': '测试消息',
             }
             title = titles.get(message.event_type, '通知')

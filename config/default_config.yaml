@@ -6,7 +6,7 @@
 
 app:
   name: "DEVICE LINK"
-  version: "1.0.8"
+  version: "1.0.9"
   language: "zh-CN"
   start_minimized: true
   minimize_to_tray: true
@@ -38,6 +38,9 @@ notify:
     window_seconds: 300
     max_events_per_digest: 50
     send_immediate_if_critical: true
+  daily_report:
+    enabled: false
+    send_time: "08:00"
   email:
     smtp_host: ""
     smtp_port: 465

@@ -21,6 +21,9 @@
 创建日期：2026-08-07
 """
 import time
+import os
+import sys
+import json
 import threading
 import logging
 from datetime import datetime
@@ -52,7 +55,7 @@ class AlertEngine:
     """
 
     def __init__(self, config: dict, alert_repo, channels: list = None,
-                 device_repo=None):
+                 device_repo=None, daily_state_file: str = None):
         """
         初始化告警引擎。
 
@@ -99,6 +102,10 @@ class AlertEngine:
         # 摘要泵线程（修复 Bug H：DigestEngine 窗口定时器从未启动，
         # 导致摘要通知永不发送；用 2 秒泵轮询窗口/容量条件）
         self._digest_pump_thread: Optional[threading.Thread] = None
+        # 每日离线报告（v1.0.9）：每天 send_time 发送当前离线设备清单
+        self._daily_report_thread: Optional[threading.Thread] = None
+        self._daily_state_file = daily_state_file
+        self._daily_report_last_sent = self._load_daily_state()
         self._running = True
 
         logger.info(
@@ -349,6 +356,10 @@ class AlertEngine:
             target=self._digest_pump, daemon=True, name="digest-pump"
         )
         self._digest_pump_thread.start()
+        self._daily_report_thread = threading.Thread(
+            target=self._daily_report_loop, daemon=True, name="daily-report"
+        )
+        self._daily_report_thread.start()
         logger.info("告警升级检查已启动（每 60 秒扫描）")
 
     def _digest_pump(self):
@@ -362,6 +373,152 @@ class AlertEngine:
             except Exception:
                 logger.exception("摘要泵异常（已恢复）")
             time.sleep(2)
+
+    # ==================== 每日离线报告 ====================
+
+    def _daily_report_loop(self):
+        """每日报告循环：每 30 秒检查是否到达发送时间（当天只发一次）。"""
+        while self._running:
+            try:
+                self._maybe_send_daily_report()
+            except Exception:
+                logger.exception("每日离线报告异常（已恢复）")
+            time.sleep(30)
+
+    def _maybe_send_daily_report(self):
+        """
+        到点发送每日离线设备清单。
+        规则：
+          - 未启用 → 不发送
+          - 当前时间未到 send_time → 等待
+          - 当天已发送过（状态文件记录）→ 跳过（防重复）
+          - 当前离线设备 0 台 → 不发送邮件，仅记录日志
+          - 只统计 devices.status='offline'（pending_failure/维护中不计入）
+        """
+        notify_cfg = self._config.get('notify', {})
+        daily_cfg = notify_cfg.get('daily_report', {})
+        if not daily_cfg.get('enabled', False):
+            return
+        send_time = str(daily_cfg.get('send_time', '08:00')).strip()
+        now = datetime.now()
+        if now.strftime('%H:%M') < send_time:
+            return
+        today = now.strftime('%Y-%m-%d')
+        if self._daily_report_last_sent == today:
+            return
+        if self._device_repo is None:
+            logger.warning("每日离线报告：未注入 device_repo，无法统计离线设备，跳过")
+            return
+
+        devices = self._device_repo.list_current_offline_devices()
+        if not devices:
+            self._mark_daily_sent(today)
+            logger.info(
+                f"每日离线报告：{today} 当前离线设备 0 台，不发送邮件"
+            )
+            return
+
+        dev_lines = []
+        events = []
+        for d in devices:
+            name = d.get('name') or f"#{d.get('id', '')}"
+            ip = d.get('ip_address') or '-'
+            subsys = d.get('subsystem_name') or '未分组'
+            last_check = d.get('last_check_time') or '-'
+            downtime = self._format_downtime(d.get('last_downtime_start'))
+            dev_lines.append(
+                f"- {name} ({ip}) [{subsys}] 最近探测: {last_check}"
+                + (f"，离线时长: {downtime}" if downtime else "")
+            )
+            events.append({
+                'device_name': name,
+                'ip_address': ip,
+                'subsystem': subsys,
+                'last_check_time': last_check,
+                'downtime': downtime,
+            })
+
+        msg = AlertMessage(
+            event_type='daily_report',
+            device_name=f"{len(devices)} 台设备离线",
+            message=(
+                f"截至 {now.strftime('%Y-%m-%d %H:%M:%S')}，当前 "
+                f"{len(devices)} 台设备离线（待定/维护中不计入）。"
+            ),
+            occurred_at=now.strftime('%Y-%m-%d %H:%M:%S'),
+            extra={
+                'events': events,
+                '离线设备清单': '\n'.join(dev_lines),
+            },
+        )
+
+        success_count = 0
+        channel_names = []
+        for ch in self._channels:
+            result = self._send_with_retry(ch, msg)
+            if result.success:
+                success_count += 1
+                channel_names.append(ch.get_channel_name())
+        self._mark_daily_sent(today)
+        logger.info(
+            f"每日离线报告已发送: {today}, {len(devices)} 台设备离线, "
+            f"{success_count}/{len(self._channels)} 通道成功"
+        )
+
+    def _format_downtime(self, downtime_start) -> str:
+        """将离线开始时间格式化为持续时长；无法解析时返回空串。"""
+        if not downtime_start:
+            return ''
+        try:
+            start = datetime.fromisoformat(str(downtime_start))
+            delta = datetime.now() - start
+            if delta.total_seconds() < 0:
+                return ''
+            hours = int(delta.total_seconds() // 3600)
+            minutes = int((delta.total_seconds() % 3600) // 60)
+            if hours > 0:
+                return f"{hours}小时{minutes}分钟"
+            return f"{minutes}分钟"
+        except Exception:
+            return ''
+
+    def _mark_daily_sent(self, today: str):
+        """记录当天已发送（内存 + 状态文件）。"""
+        self._daily_report_last_sent = today
+        self._save_daily_state(today)
+
+    def _daily_state_path(self) -> str:
+        """每日报告状态文件路径（记录最近发送日期，防止重复发送）。"""
+        if self._daily_state_file:
+            return self._daily_state_file
+        if getattr(sys, 'frozen', False):
+            root = os.path.dirname(sys.executable)
+        else:
+            root = os.path.dirname(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            )
+        return os.path.join(root, 'logs', 'daily_report_state.json')
+
+    def _load_daily_state(self) -> str:
+        """读取最近一次发送日期（无记录返回空串）。"""
+        try:
+            with open(self._daily_state_path(), 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            return str(data.get('last_sent_date', ''))
+        except Exception:
+            return ''
+
+    def _save_daily_state(self, today: str):
+        """原子写每日报告状态。"""
+        path = self._daily_state_path()
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = path + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump({'last_sent_date': today}, f, ensure_ascii=False)
+            os.replace(tmp, path)
+        except Exception as e:
+            logger.error(f"写入每日报告状态失败: {e}")
 
     # ==================== 内部方法 ====================
 

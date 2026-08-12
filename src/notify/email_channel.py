@@ -129,6 +129,7 @@ class EmailChannel(BaseNotificationChannel):
             'recovery': '[已恢复]',
             'escalation': '[升级]',
             'digest': '[摘要]',
+            'daily_report': '[每日清单]',
             'test': '[测试]',
         }
         tag = tags.get(msg.event_type, '')
@@ -145,6 +146,7 @@ class EmailChannel(BaseNotificationChannel):
             'recovery': ('#52C41A', '#F6FFED', '设备恢复通知'),
             'escalation': ('#FA8C16', '#FFF7E6', '告警升级通知'),
             'digest': ('#1890FF', '#E6F7FF', '告警合并摘要'),
+            'daily_report': ('#722ED1', '#F9F0FF', '每日离线设备清单'),
             'test': ('#1890FF', '#E6F7FF', '测试邮件'),
         }
         color, bg_color, title = colors.get(msg.event_type, colors['test'])
@@ -156,23 +158,34 @@ class EmailChannel(BaseNotificationChannel):
         elif msg.event_type == 'escalation':
             minutes = msg.extra.get('escalation_minutes', 0)
             extra_info = f'<p style="font-size:14px;">该告警已持续 <b>{minutes} 分钟</b> 未确认，自动升级通知</p>'
-        elif msg.event_type == 'digest':
+        elif msg.event_type in ('digest', 'daily_report'):
             events_list = msg.extra.get('events', [])
+            is_daily = (msg.event_type == 'daily_report')
+            downtime_header = '<th style="padding:8px; text-align:left;">离线时长</th>' if is_daily else ''
+            time_header = '最近探测' if is_daily else '时间'
             rows = ''
             for e in events_list:
                 if isinstance(e, dict):
+                    time_col = e.get('occurred_at') or e.get('last_check_time', '')
+                    downtime = e.get('downtime', '')
+                    downtime_cell = (
+                        f'<td style="padding:8px; border-bottom:1px solid #f0f0f0;">{downtime}</td>'
+                        if is_daily else ''
+                    )
                     rows += f"""
                     <tr>
                       <td style="padding:8px; border-bottom:1px solid #f0f0f0;">{e.get('device_name', '')}</td>
                       <td style="padding:8px; border-bottom:1px solid #f0f0f0;">{e.get('ip_address', '')}</td>
                       <td style="padding:8px; border-bottom:1px solid #f0f0f0;">{e.get('subsystem', '')}</td>
-                      <td style="padding:8px; border-bottom:1px solid #f0f0f0;">{e.get('occurred_at', '')}</td>
+                      <td style="padding:8px; border-bottom:1px solid #f0f0f0;">{time_col}</td>
+                      {downtime_cell}
                     </tr>"""
             extra_info = f"""
             <table style="width:100%; border-collapse:collapse; margin-top:16px;">
               <thead><tr style='background:#fafafa;'>
                 <th style='padding:8px; text-align:left;'>设备</th><th style='padding:8px; text-align:left;'>IP</th>
-                <th style='padding:8px; text-align:left;'>子系统</th><th style='padding:8px; text-align:left;'>时间</th>
+                <th style='padding:8px; text-align:left;'>子系统</th><th style='padding:8px; text-align:left;'>{time_header}</th>
+                {downtime_header}
               </tr></thead>
               <tbody>{rows}</tbody>
             </table>"""

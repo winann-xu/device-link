@@ -80,6 +80,7 @@ class WeComChannel(BaseNotificationChannel):
                 'recovery': 'info',
                 'escalation': 'warning',
                 'digest': 'info',
+                'daily_report': 'info',
                 'test': 'comment',
             }
             c = colors.get(message.event_type, 'comment')
@@ -111,6 +112,7 @@ class WeComChannel(BaseNotificationChannel):
             'recovery': '设备恢复通知',
             'escalation': '告警升级通知',
             'digest': '告警合并摘要',
+            'daily_report': '每日离线设备清单',
             'test': '测试消息',
         }.get(event_type, '通知')
 
