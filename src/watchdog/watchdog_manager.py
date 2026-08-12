@@ -338,6 +338,26 @@ class WatchdogProcess:
         return True
 
 
+def _startup_shortcut_path() -> str:
+    """开机自启快捷方式完整路径（winshell 优先，回退 APPDATA Startup）。"""
+    if sys.platform != 'win32':
+        return ''
+    try:
+        import winshell
+        return os.path.join(winshell.startup(), 'DEVICE LINK.lnk')
+    except Exception:
+        return os.path.join(
+            os.environ.get('APPDATA', ''),
+            r'Microsoft\Windows\Start Menu\Programs\Startup\DEVICE LINK.lnk'
+        )
+
+
+def is_startup_shortcut_enabled() -> bool:
+    """检查开机自启是否已启用（快捷方式是否存在）。"""
+    path = _startup_shortcut_path()
+    return bool(path) and os.path.exists(path)
+
+
 def setup_startup_shortcut(exe_path: str) -> bool:
     """
     创建开机自启快捷方式（shell:startup 目录）。
@@ -353,8 +373,7 @@ def setup_startup_shortcut(exe_path: str) -> bool:
         return False
     try:
         import winshell
-        startup = winshell.startup()
-        shortcut_path = os.path.join(startup, 'DEVICE LINK.lnk')
+        shortcut_path = _startup_shortcut_path()
         with winshell.shortcut(shortcut_path) as link:
             link.path = exe_path
             link.working_directory = os.path.dirname(exe_path)
@@ -367,11 +386,7 @@ def setup_startup_shortcut(exe_path: str) -> bool:
         try:
             import pythoncom
             from win32com.client import Dispatch
-            startup_dir = os.path.join(
-                os.environ.get('APPDATA', ''),
-                r'Microsoft\Windows\Start Menu\Programs\Startup'
-            )
-            shortcut_path = os.path.join(startup_dir, 'DEVICE LINK.lnk')
+            shortcut_path = _startup_shortcut_path()
             shell = Dispatch('WScript.Shell')
             shortcut = shell.CreateShortCut(shortcut_path)
             shortcut.Targetpath = exe_path
@@ -391,9 +406,7 @@ def remove_startup_shortcut() -> bool:
     if sys.platform != 'win32':
         return False
     try:
-        import winshell
-        startup = winshell.startup()
-        shortcut_path = os.path.join(startup, 'DEVICE LINK.lnk')
+        shortcut_path = _startup_shortcut_path()
         if os.path.exists(shortcut_path):
             os.remove(shortcut_path)
             return True

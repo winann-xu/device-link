@@ -187,12 +187,17 @@ class MainWindow:
         self._tray.setToolTip("DEVICE LINK 内网设备监控")
 
         # 托盘菜单
+        from ..watchdog.watchdog_manager import is_startup_shortcut_enabled
         tray_menu = QMenu()
         show_action = tray_menu.addAction("打开主界面")
         show_action.triggered.connect(self.show)
         pause_action = tray_menu.addAction("暂停监控")
         pause_action.setCheckable(True)
         pause_action.toggled.connect(self._on_pause_toggle)
+        self._autostart_action = tray_menu.addAction("开机自启")
+        self._autostart_action.setCheckable(True)
+        self._autostart_action.setChecked(is_startup_shortcut_enabled())
+        self._autostart_action.toggled.connect(self._on_autostart_toggled)
         tray_menu.addSeparator()
         quit_action = tray_menu.addAction("退出")
         quit_action.triggered.connect(self._on_quit)
@@ -259,6 +264,27 @@ class MainWindow:
             self._scheduler.pause()
         else:
             self._scheduler.resume()
+
+    def _on_autostart_toggled(self, checked: bool):
+        """开机自启开关：创建/移除启动文件夹快捷方式。"""
+        from PySide6.QtWidgets import QMessageBox
+        from ..watchdog.watchdog_manager import (
+            setup_startup_shortcut, remove_startup_shortcut,
+        )
+        try:
+            if checked:
+                ok = setup_startup_shortcut(sys.executable)
+            else:
+                ok = remove_startup_shortcut()
+            if checked and not ok:
+                self._autostart_action.setChecked(False)
+                QMessageBox.warning(
+                    self._window, "开机自启",
+                    "创建开机自启快捷方式失败，请检查权限后重试。",
+                )
+        except Exception as e:
+            self._autostart_action.setChecked(False)
+            logger.error(f"开机自启设置失败: {e}")
 
     def _on_close_event(self, event):
         """点击 × → 最小化到托盘（不退出）。"""

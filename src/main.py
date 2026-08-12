@@ -81,7 +81,7 @@ def load_config(config_path: str = None) -> dict:
                 logger.warning(f"默认配置文件不存在: {default_config}，写入最小配置")
                 with open(config_path, 'w', encoding='utf-8') as f:
                     yaml.safe_dump({
-                    "app": {"name": "DEVICE LINK", "version": "1.0.9",
+                    "app": {"name": "DEVICE LINK", "version": "1.0.10",
                             "start_minimized": True, "minimize_to_tray": True,
                             "single_instance": True},
                     "monitor": {"default_interval_seconds": 30,

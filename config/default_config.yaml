@@ -6,7 +6,7 @@
 
 app:
   name: "DEVICE LINK"
-  version: "1.0.9"
+  version: "1.0.10"
   language: "zh-CN"
   start_minimized: true
   minimize_to_tray: true

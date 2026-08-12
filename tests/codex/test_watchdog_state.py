@@ -57,3 +57,14 @@ def test_clean_shutdown_marker(tmp_path):
     w._write_state(_state())
     w.mark_clean_shutdown()
     assert w._read_state()["clean_shutdown"] is True
+
+
+def test_is_startup_shortcut_enabled(tmp_path, monkeypatch):
+    """开机自启状态检测：快捷方式存在即视为已启用。"""
+    import src.watchdog.watchdog_manager as wm
+    lnk = str(tmp_path / "DEVICE LINK.lnk")
+    monkeypatch.setattr(wm, "_startup_shortcut_path", lambda: lnk)
+    assert wm.is_startup_shortcut_enabled() is False
+    with open(lnk, "w", encoding="utf-8") as f:
+        f.write("")
+    assert wm.is_startup_shortcut_enabled() is True
