@@ -334,16 +334,15 @@ class AlertConfigPanel:
                 return
 
         # 全局阈值应用到现有设备（DB）与运行中的状态机（调度器）
+        # 修复（v1.0.7.1）：原来逐台 update_device()（每台一次 commit），
+        # 上千台设备在探测并发写下保存耗时数分钟、GUI 卡死；
+        # 改为单事务批量 UPDATE。
         applied_devices = 0
         if self._device_repo is not None:
             try:
-                devices = self._device_repo.list_devices()
-                for d in devices:
-                    self._device_repo.update_device(d['id'], {
-                        'failure_threshold': failure_n,
-                        'recovery_threshold': recovery_m,
-                    })
-                    applied_devices += 1
+                applied_devices = self._device_repo.apply_global_thresholds_to_db(
+                    failure_n, recovery_m
+                )
             except Exception as e:
                 logger.error(f"应用全局阈值到设备失败: {e}")
         if self._scheduler is not None:

@@ -30,13 +30,26 @@ _DB_LOCK = threading.RLock()
 
 
 def _db_sync(method):
-    """装饰器：让仓储的【写】方法在全局数据库锁内串行执行。"""
+    """装饰器：让仓储的【写】方法在全局数据库锁内串行执行。
+
+    稳定性修复（v1.0.7.1）：写方法抛异常时必须回滚当前连接事务。
+    否则 sqlite3 遗留模式会在语句失败（如 FOREIGN KEY）后保持事务打开，
+    该连接会一直持有 WAL 写锁 → 其他线程写 5 秒后报 "database is locked"，
+    表现为探测流程大量落库失败（设备本身正常）。
+    """
     import functools
 
     @functools.wraps(method)
     def wrapper(self, *args, **kwargs):
         with _DB_LOCK:
-            return method(self, *args, **kwargs)
+            try:
+                return method(self, *args, **kwargs)
+            except Exception:
+                try:
+                    self._conn.rollback()
+                except Exception:
+                    pass
+                raise
 
     return wrapper
 
@@ -62,7 +75,7 @@ _WRITE_METHOD_NAMES = {
         'add_device', 'update_device', 'delete_device', 'delete_devices',
         'add_devices_batch', 'import_from_csv', 'set_device_status',
         'record_check_result', 'record_check', 'set_maintenance_batch',
-        'enable_batch',
+        'enable_batch', 'apply_global_thresholds_to_db',
     },
     'HistoryRepository': {
         'insert_status', 'cleanup_expired',
@@ -418,6 +431,27 @@ class DeviceRepository:
             cursor = self._conn.execute(
                 f"UPDATE devices SET is_enabled=?, updated_at=datetime('now','localtime') WHERE id IN ({placeholders})",
                 [value] + device_ids
+            )
+            self._conn.commit()
+            return cursor.rowcount
+
+    def apply_global_thresholds_to_db(self, failure_threshold: int,
+                                      recovery_threshold: int) -> int:
+        """
+        单事务批量更新全部设备的失败/恢复阈值。
+
+        修复（v1.0.7.1）：告警配置保存原来对每台设备逐条 update_device()
+        （每次独立 commit），1143 台设备在探测写并发下耗时数分钟、
+        GUI 卡死。改为一条 UPDATE + 一次 commit。
+
+        返回:
+            受影响设备数
+        """
+        with self._lock:
+            cursor = self._conn.execute(
+                """UPDATE devices SET failure_threshold=?, recovery_threshold=?,
+                   updated_at=datetime('now','localtime')""",
+                (int(failure_threshold), int(recovery_threshold))
             )
             self._conn.commit()
             return cursor.rowcount

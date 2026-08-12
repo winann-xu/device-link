@@ -27,6 +27,7 @@ import time
 import threading
 import random
 import logging
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import datetime
 from dataclasses import dataclass
@@ -257,7 +258,7 @@ class MonitorScheduler:
         """
         updated = 0
         for machine in list(self._machines.values()):
-            machine.set_thresholds(failure_threshold, recovery_threshold)
+            machine.set_thresholds(failure_threshold, recovery_threshold, silent=True)
             updated += 1
         logger.info(f"全局阈值已应用到 {updated} 台设备")
         return updated
@@ -344,20 +345,9 @@ class MonitorScheduler:
             # 2. 状态转换
             transition = machine.transition(outcome)
 
-            # 3. 更新数据库状态（状态 + 历史合并为一次事务，减少写锁次数）
-            self._device_repo.record_check(
-                did,
-                status=machine.status.value,
-                failure_count=machine.failure_count,
-                recovery_count=getattr(machine, '_recovery_count', 0),
-                latency_ms=outcome.latency_ms,
-                success=outcome.is_online,
-            )
-
-            # 4. 更新缓存
+            # 3. 缓存与回调先行（UI/告警不依赖 DB 写成功；
+            #    写库失败时快照仍是事实源，仪表盘与状态栏保持一致）
             self._status_cache[did] = machine.status.value
-
-            # 5. 如果有状态变更，通知所有回调
             if transition is not None:
                 logger.info(
                     f"设备状态变更: {device.get('name')} "
@@ -370,6 +360,31 @@ class MonitorScheduler:
                             cb(transition)
                         except Exception as e:
                             logger.error(f"回调异常: {e}", exc_info=True)
+
+            # 4. 落库（状态 + 历史合并为一次事务；失败不影响探测流程与 UI）
+            try:
+                self._device_repo.record_check(
+                    did,
+                    status=machine.status.value,
+                    failure_count=machine.failure_count,
+                    recovery_count=getattr(machine, '_recovery_count', 0),
+                    latency_ms=outcome.latency_ms,
+                    success=outcome.is_online,
+                )
+            except sqlite3.IntegrityError as e:
+                # 设备已被删除（FOREIGN KEY）：从调度器移除，避免残留
+                # 导致仪表盘/状态栏统计不一致
+                if 'FOREIGN KEY' in str(e):
+                    logger.warning(
+                        f"设备已不存在（可能已删除），移出调度: {device.get('name')}"
+                    )
+                    self.remove_device(did)
+                else:
+                    logger.error(
+                        f"设备状态落库失败 [{device.get('name')}]: {e}"
+                    )
+            except Exception as e:
+                logger.error(f"设备状态落库失败 [{device.get('name')}]: {e}")
 
         except Exception as e:
             self._total_failures += 1
