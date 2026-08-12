@@ -6,7 +6,7 @@
 
 app:
   name: "DEVICE LINK"
-  version: "1.0.6"
+  version: "1.0.7"
   language: "zh-CN"
   start_minimized: true
   minimize_to_tray: true
@@ -18,6 +18,9 @@ monitor:
   default_failure_threshold: 3
   default_recovery_threshold: 2
   max_workers: 50
+  # 单轮调度最多提交的探测任务数（上限 = max_workers），
+  # 防止启动/批量导入后上千台设备同刻涌入线程池与数据库写锁
+  max_submit_per_tick: 50
   jitter_schedule: true
 
 watchdog:
@@ -26,6 +29,8 @@ watchdog:
   heartbeat_timeout_seconds: 15
   max_restart_attempts: 3
   restart_cooldown_seconds: 30
+  # 主进程稳定运行超过该时长后，看门狗将重启计数复位（跨崩溃轮次）
+  healthy_threshold_seconds: 300
 
 notify:
   digest:

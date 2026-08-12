@@ -30,7 +30,7 @@ _DB_LOCK = threading.RLock()
 
 
 def _db_sync(method):
-    """装饰器：让仓储的公共方法在全局数据库锁内执行。"""
+    """装饰器：让仓储的【写】方法在全局数据库锁内串行执行。"""
     import functools
 
     @functools.wraps(method)
@@ -39,6 +39,41 @@ def _db_sync(method):
             return method(self, *args, **kwargs)
 
     return wrapper
+
+
+def _db_read(method):
+    """装饰器：只读方法无需全局锁——WAL 模式下多连接并发读安全。
+
+    修复（v1.0.7）：此前读方法也走全局 _DB_LOCK，调度主循环每轮
+    get_device 都要排队等写锁；大批量导入/探测洪峰时主循环被饿死，
+    心跳停更被看门狗误杀。读操作与写锁解耦后，主循环不再受写拥塞影响。
+    """
+    import functools
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        return method(self, *args, **kwargs)
+
+    return wrapper
+
+
+_WRITE_METHOD_NAMES = {
+    'DeviceRepository': {
+        'add_device', 'update_device', 'delete_device', 'delete_devices',
+        'add_devices_batch', 'import_from_csv', 'set_device_status',
+        'record_check_result', 'record_check', 'set_maintenance_batch',
+        'enable_batch',
+    },
+    'HistoryRepository': {
+        'insert_status', 'cleanup_expired',
+    },
+    'AlertRepository': {
+        'insert_event', 'acknowledge', 'update_notify_result',
+    },
+    'ChannelRepository': {
+        'save_channel', 'update_last_test',
+    },
+}
 
 
 class DeviceRepository:
@@ -295,6 +330,34 @@ class DeviceRepository:
                    latency_ms=?, last_check_time=?, updated_at=datetime('now','localtime')
                    WHERE id=?""",
                 (status, failure_count, recovery_count, latency_ms, now, device_id)
+            )
+            self._conn.commit()
+        return True
+
+    def record_check(self, device_id: int, status: str, failure_count: int,
+                     recovery_count: int = 0, latency_ms: float = 0.0,
+                     success: bool = True) -> bool:
+        """
+        合并记录一次探测结果：设备状态更新 + 状态历史插入，单事务完成。
+
+        修复（v1.0.7）：原 _probe_and_process 对每次探测分别调用
+        set_device_status 与 record_check_result（两次独立 commit），
+        探测洪峰时写锁占用翻倍。合并后写锁次数减半、fsync 减半。
+
+        返回:
+            True 表示成功
+        """
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        with self._lock:
+            self._conn.execute(
+                """UPDATE devices SET status=?, failure_count=?, recovery_count=?,
+                   latency_ms=?, last_check_time=?, updated_at=datetime('now','localtime')
+                   WHERE id=?""",
+                (status, failure_count, recovery_count, latency_ms, now, device_id)
+            )
+            self._conn.execute(
+                "INSERT INTO status_history (device_id, status, latency_ms) VALUES (?,?,?)",
+                (device_id, 'online' if success else 'offline', latency_ms)
             )
             self._conn.commit()
         return True
@@ -676,8 +739,13 @@ class ChannelRepository:
         return True
 
 # ==================== Bug I 修复 ====================
-# 统一给所有仓储类的公共方法加全局数据库锁，串行化跨线程访问。
+# 所有仓储类的公共方法统一加锁：写方法走全局写锁（串行化），
+# 读方法不加锁（WAL 并发读安全），避免读写相互阻塞（v1.0.7 拆分）。
 for _repo_cls in (DeviceRepository, HistoryRepository, AlertRepository, ChannelRepository):
+    _writes = _WRITE_METHOD_NAMES.get(_repo_cls.__name__, set())
     for _name, _method in list(vars(_repo_cls).items()):
         if callable(_method) and not _name.startswith("_"):
-            setattr(_repo_cls, _name, _db_sync(_method))
+            if _name in _writes:
+                setattr(_repo_cls, _name, _db_sync(_method))
+            else:
+                setattr(_repo_cls, _name, _db_read(_method))

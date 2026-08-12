@@ -45,6 +45,7 @@ def test_health_check_fresh_tick_no_exit(monkeypatch):
     t = HealthCheckThread(FakeScheduler(fresh), heartbeat_interval=0.05, heartbeat_timeout=5)
     t.start()
     time.sleep(0.4)
+    t.stop()
     assert exited == [], "心跳正常时不应退出"
 
 

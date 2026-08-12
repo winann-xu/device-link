@@ -172,6 +172,7 @@ def test_digest_send_persists_notify_success(env):
     ae.on_monitor_event(StateTransition(device_id=did, old_status=DeviceStatus.ONLINE,
                                         new_status=DeviceStatus.OFFLINE, event_type="device_offline",
                                         failure_count=3, downtime_start="x", suppress_alert=False))
-    time.sleep(4)
+    # 窗口 2s + 摘要泵轮询最长 2s + 落库余量：固定 6s 避免时序抖动
+    time.sleep(6)
     ev = alert.list_events(event_type="offline")[0]
     assert ev["notify_success"] == 2, "摘要投递成功后 notify_success 应落库为 2"

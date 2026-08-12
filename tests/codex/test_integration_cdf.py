@@ -86,7 +86,7 @@ def test_digest_merge_10_to_1(env):
         did = repo.add_device({"name": f"D{i}", "ip_address": f"10.0.0.{i}",
                                "subsystem_name": "MES", "is_enabled": 1})
         ae.on_monitor_event(tr(did, "device_offline"))
-    time.sleep(7)  # 等 5 秒窗口到期触发摘要发送
+    time.sleep(9)  # 窗口 5s + 摘要泵轮询最长 2s + 落库余量：固定 9s 避免时序抖动
     digests = [m for m in channel.sent if m.event_type == "digest"]
     assert len(digests) == 1, f"10 条离线应合并为 1 封摘要，实际 {len(digests)}"
     assert len(digests[0].extra.get("events", [])) == 10

@@ -11,6 +11,15 @@
   - 探测失败设备不影响正常设备调度
   - 缓存与 SQLite 双写（缓存优先，SQLite 异步批量落盘）
 
+ 稳定性加固（v1.0.7）：
+  - 主循环不再依赖全局数据库锁：每 tick 只对“本次要提交的设备”做一次
+    无锁读库刷新（WAL 并发读安全），心跳不再因锁队列拥塞而停更
+  - 单 tick 提交上限 max_submit_per_tick：启动/批量导入后设备同时到期时，
+    任务分批提交，避免上千台瞬间涌入线程池与数据库锁
+  - 新增设备首轮探测在完整检查间隔内随机错峰（jitter_schedule），
+    避免启动惊群
+  - add_device 幂等：重复同步只刷新数据缓存，不重置调度时间
+
 作者：Claude
 创建日期：2026-08-07
 """
@@ -75,13 +84,25 @@ class MonitorScheduler:
         monitor_cfg = config.get('monitor', {})
         self._max_workers = monitor_cfg.get('max_workers', 50)
         self._jitter = monitor_cfg.get('jitter_schedule', True)
+        # 单 tick 最多提交的探测任务数（上限 = 线程池大小，防止队列无限堆积）
+        self._max_submit_per_tick = max(
+            1, min(
+                int(monitor_cfg.get('max_submit_per_tick', self._max_workers)),
+                self._max_workers,
+            )
+        )
 
         # 为每台设备创建状态机
         self._machines: dict[int, DeviceStateMachine] = {}
         # 调度索引：device_id → {'interval': 秒, 'next_check': timestamp}
         self._schedule: dict[int, dict] = {}
+        # 设备数据缓存：device_id → device dict（主循环探测用，GUI 编辑后经
+        # add_device/remove_device 同步刷新；与 DB 一致由读库兜底）
+        self._devices: dict[int, dict] = {}
         # 状态缓存：device_id → status_str（UI 毫秒级读取，不加锁【GIL 保护单字读】）
         self._status_cache: dict[int, str] = {}
+        # 调度索引并发变更锁（主循环迭代 vs GUI 增删改）
+        self._schedule_lock = threading.RLock()
 
         for d in devices:
             if d.get('is_enabled'):
@@ -112,23 +133,33 @@ class MonitorScheduler:
             monitor_cfg.get('default_timeout_ms', 3000) * 3 / 1000.0 + 1.0
         )
 
-        logger.info(f"调度器初始化完成：{len(self._machines)} 台设备, max_workers={self._max_workers}")
+        logger.info(
+            f"调度器初始化完成：{len(self._machines)} 台设备, "
+            f"max_workers={self._max_workers}, max_submit_per_tick={self._max_submit_per_tick}"
+        )
 
     def _add_device(self, device: dict):
         """将设备加入调度索引与状态缓存。"""
         did = device['id']
-        self._machines[did] = DeviceStateMachine(device)
-        interval = device.get('check_interval_seconds', 30)
-        next_check = time.time()
-        if self._jitter:
-            # 随机打散：±20% 偏移，防止惊群效应
-            jitter_range = interval * 0.2
-            next_check += random.uniform(0, jitter_range)
-        self._schedule[did] = {
-            'interval': interval,
-            'next_check': next_check,
-        }
-        self._status_cache[did] = device.get('status', 'unknown')
+        with self._schedule_lock:
+            if did in self._machines:
+                # 已存在：仅刷新数据缓存，保留状态机与调度时间。
+                # GUI 的 _sync_scheduler 会全量调用 add_device，若不幂等，
+                # 每次增删改都会重置全部设备首轮时间 → 再次引发探测惊群。
+                self._devices[did] = device
+                return
+            self._machines[did] = DeviceStateMachine(device)
+            self._devices[did] = device
+            interval = device.get('check_interval_seconds', 30)
+            next_check = time.time()
+            if self._jitter:
+                # 完整检查间隔内随机错峰：启动/导入后设备不会同刻爆发
+                next_check += random.uniform(0, interval)
+            self._schedule[did] = {
+                'interval': interval,
+                'next_check': next_check,
+            }
+            self._status_cache[did] = device.get('status', 'unknown')
 
     def register_callback(self, cb: Callable):
         """
@@ -206,14 +237,18 @@ class MonitorScheduler:
     def add_device(self, device: dict):
         """动态添加新设备到调度索引。"""
         if device.get('is_enabled'):
+            is_new = device['id'] not in self._machines
             self._add_device(device)
-            logger.info(f"设备已加入调度: {device.get('name')}")
+            if is_new:
+                logger.info(f"设备已加入调度: {device.get('name')}")
 
     def remove_device(self, device_id: int):
         """动态移除设备。"""
-        self._machines.pop(device_id, None)
-        self._schedule.pop(device_id, None)
-        self._status_cache.pop(device_id, None)
+        with self._schedule_lock:
+            self._machines.pop(device_id, None)
+            self._schedule.pop(device_id, None)
+            self._devices.pop(device_id, None)
+            self._status_cache.pop(device_id, None)
 
     def apply_global_thresholds(self, failure_threshold: int = None,
                                 recovery_threshold: int = None):
@@ -221,7 +256,7 @@ class MonitorScheduler:
         将全局告警规则（失败阈值 N / 恢复阈值 M）热更新到所有运行中的状态机。
         """
         updated = 0
-        for machine in self._machines.values():
+        for machine in list(self._machines.values()):
             machine.set_thresholds(failure_threshold, recovery_threshold)
             updated += 1
         logger.info(f"全局阈值已应用到 {updated} 台设备")
@@ -236,34 +271,57 @@ class MonitorScheduler:
         """
         while self._running:
             self._last_tick_time = time.time()
-
             try:
-                if not self._paused:
-                    now = time.time()
-                    expired = []
-                    for did, sched in self._schedule.items():
-                        if sched['next_check'] <= now:
-                            expired.append(did)
-
-                    for did in expired:
-                        machine = self._machines.get(did)
-                        if machine is None:
-                            continue
-                        device = self._device_repo.get_device(did)
-                        if device is None or not device.get('is_enabled'):
-                            continue
-
-                        # 提交探测任务到线程池
-                        self._executor.submit(self._probe_and_process, device, machine)
-
-                        # 更新下次检查时间
-                        sched = self._schedule[did]
-                        sched['next_check'] = now + sched['interval']
-
+                self._do_tick(time.time())
                 time.sleep(1)
 
             except Exception as e:
                 logger.error(f"调度器主循环异常（已恢复）: {e}", exc_info=True)
+
+    def _do_tick(self, now: float):
+        """
+        执行一轮调度（独立方法便于测试）。
+        每轮最多提交 max_submit_per_tick 个到期任务；
+        提交前对设备做一次无锁读库刷新（WAL 并发读安全），
+        保证外部编辑（IP/端口/间隔）能在下轮探测生效，同时心跳不依赖全局写锁。
+        """
+        if self._paused:
+            return
+        to_submit = []
+        to_remove = []
+        with self._schedule_lock:
+            submitted = 0
+            for did, sched in list(self._schedule.items()):
+                if submitted >= self._max_submit_per_tick:
+                    break
+                if sched['next_check'] > now:
+                    continue
+                machine = self._machines.get(did)
+                device = self._devices.get(did)
+                if machine is None or device is None:
+                    to_remove.append(did)
+                    continue
+                # 无锁读库刷新（读操作不再经过全局写锁；失败则回退内存缓存）
+                try:
+                    fresh = self._device_repo.get_device(did)
+                    if fresh is not None:
+                        device = fresh
+                        self._devices[did] = fresh
+                except Exception as e:
+                    logger.debug(f"刷新设备数据失败 (id={did}): {e}")
+                if not device.get('is_enabled'):
+                    to_remove.append(did)
+                    continue
+                to_submit.append((device, machine))
+                sched['next_check'] = now + sched['interval']
+                submitted += 1
+            for did in to_remove:
+                self.remove_device(did)
+        for device, machine in to_submit:
+            try:
+                self._executor.submit(self._probe_and_process, device, machine)
+            except Exception as e:
+                logger.error(f"提交探测任务失败 [{device.get('name')}]: {e}")
 
     def _probe_and_process(self, device: dict, machine: DeviceStateMachine):
         """
@@ -286,16 +344,15 @@ class MonitorScheduler:
             # 2. 状态转换
             transition = machine.transition(outcome)
 
-            # 3. 更新数据库状态
-            self._device_repo.set_device_status(
+            # 3. 更新数据库状态（状态 + 历史合并为一次事务，减少写锁次数）
+            self._device_repo.record_check(
                 did,
                 status=machine.status.value,
                 failure_count=machine.failure_count,
                 recovery_count=getattr(machine, '_recovery_count', 0),
                 latency_ms=outcome.latency_ms,
+                success=outcome.is_online,
             )
-            # 记录历史
-            self._device_repo.record_check_result(did, outcome.is_online, outcome.latency_ms)
 
             # 4. 更新缓存
             self._status_cache[did] = machine.status.value

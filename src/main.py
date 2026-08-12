@@ -88,11 +88,13 @@ def load_config(config_path: str = None) -> dict:
                                 "default_timeout_ms": 3000,
                                 "default_failure_threshold": 3,
                                 "default_recovery_threshold": 2,
-                                "max_workers": 50, "jitter_schedule": True},
+                                "max_workers": 50, "max_submit_per_tick": 50,
+                                "jitter_schedule": True},
                     "watchdog": {"enabled": True, "heartbeat_interval_seconds": 5,
                                  "heartbeat_timeout_seconds": 15,
                                  "max_restart_attempts": 3,
-                                 "restart_cooldown_seconds": 30},
+                                 "restart_cooldown_seconds": 30,
+                                 "healthy_threshold_seconds": 300},
                     "notify": {"digest": {"enabled": True, "window_seconds": 300,
                                           "max_events_per_digest": 50,
                                           "send_immediate_if_critical": True},
@@ -155,12 +157,49 @@ def setup_logging(config: dict):
                 f"exe_dir={_project_root}")
 
 
+def build_restart_command() -> list:
+    """
+    构造重启主程序的命令（写入看门狗状态文件）。
+    冻结打包：exe；开发模式：python main.py，并透传原有参数（--cli/--config 等）。
+    """
+    if getattr(sys, 'frozen', False):
+        return [sys.executable] + sys.argv[1:]
+    return [sys.executable, os.path.join(_project_root, 'src', 'main.py')] + sys.argv[1:]
+
+
+def run_watchdog_mode(args):
+    """看门狗独立子进程模式（由主进程 --watchdog 拉起，勿手动运行）。"""
+    if args.parent_pid <= 0:
+        logger.error("看门狗子进程缺少 --parent-pid，拒绝启动")
+        return
+    from src.watchdog.watchdog_manager import WatchdogProcess
+    sup = WatchdogProcess(
+        heartbeat_timeout=args.heartbeat_timeout,
+        max_restarts=args.max_restarts,
+        cooldown=args.cooldown,
+        state_file=args.state_file,
+    )
+    sup.run_forever(args.parent_pid)
+
+
 def main():
     """主函数。"""
     parser = argparse.ArgumentParser(description='DEVICE LINK 内网设备监控告警系统')
     parser.add_argument('--config', help='配置文件路径')
     parser.add_argument('--no-watchdog', action='store_true', help='禁用看门狗')
     parser.add_argument('--cli', action='store_true', help='命令行模式（不启动 GUI）')
+    parser.add_argument('--watchdog', action='store_true',
+                        help='看门狗独立子进程模式（由主进程自动拉起，勿手动运行）')
+    parser.add_argument('--parent-pid', type=int, default=0,
+                        help='被守护的主进程 PID（看门狗子进程用）')
+    parser.add_argument('--heartbeat-timeout', type=int, default=15,
+                        help='看门狗轮询间隔秒数（看门狗子进程用）')
+    parser.add_argument('--max-restarts', type=int, default=3,
+                        help='最大重启次数（看门狗子进程用）')
+    parser.add_argument('--cooldown', type=int, default=30,
+                        help='重启冷却秒数（看门狗子进程用）')
+    parser.add_argument('--state-file', default=None,
+                        help='看门狗状态文件路径（看门狗子进程用）')
     args = parser.parse_args()
 
     # 1. 加载配置
@@ -171,6 +210,11 @@ def main():
     setup_logging(config)
     logger.info("=" * 50)
     logger.info(f"DEVICE LINK v{config.get('app', {}).get('version', '1.0.0')} 启动中...")
+
+    # 2.5 看门狗独立子进程模式（不启动主程序）
+    if args.watchdog:
+        run_watchdog_mode(args)
+        return
 
     # 3. 数据库初始化（设置全局路径 + 建表，各线程通过 get_connection() 获取独立连接）
     db_path = get_db_path(config)
@@ -197,6 +241,7 @@ def main():
     alert_engine.run_escalation_loop()
 
     # 8. 启动看门狗
+    watchdog = None
     if not args.no_watchdog:
         watchdog_cfg = config.get('watchdog', {})
         if watchdog_cfg.get('enabled', True):
@@ -214,8 +259,9 @@ def main():
                 watchdog_cfg.get('heartbeat_timeout_seconds', 15),
                 watchdog_cfg.get('max_restart_attempts', 3),
                 watchdog_cfg.get('restart_cooldown_seconds', 30),
+                watchdog_cfg.get('healthy_threshold_seconds', 300),
             )
-            watchdog.start(os.getpid())
+            watchdog.start(os.getpid(), restart_command=build_restart_command())
             logger.info("看门狗（第 2 层）已启动")
 
     # 9. 启动调度器
@@ -250,7 +296,9 @@ def main():
                 window.hide()
 
             logger.info("GUI 已启动")
-            sys.exit(app.exec())
+            # 不用 sys.exit：让 app.exec() 返回后走到统一清理
+            # （正常退出前写看门狗标记，防止被误重启）
+            app.exec()
 
         except ImportError as e:
             logger.warning(f"PySide6 不可用({e})，切换到 CLI 模式")
@@ -267,6 +315,8 @@ def main():
                 print("\n退出")
 
     # 11. 清理
+    if watchdog is not None:
+        watchdog.mark_clean_shutdown()
     scheduler.stop()
     logger.info("DEVICE LINK 已退出")
 
