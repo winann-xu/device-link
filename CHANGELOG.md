@@ -56,11 +56,11 @@
 
 ### 测试
 
-- 新增 `tests/codex/test_retention_and_index.py`（48 项）：保留期配置解析与旧配置兼容、
+- 新增 `tests/codex/test_retention_and_index.py`（49 项）：保留期配置解析与旧配置兼容、
   分批删除、告警事件保留口径、索引存在性/幂等/`EXPLAIN QUERY PLAN` 必须命中索引、
   日汇总累加与覆盖式回填、回退路径、统计口径一致性、后台线程生命周期与异常隔离、
   设备删除级联、`--vacuum-now` 独占检测与压缩、性能冒烟
-- 全量测试 195 passed（原 148 + 新增 47），Windows 10 + Python 3.12 实测通过
+- 全量测试 197 passed（原 148 + 新增 49），Windows 10 + Python 3.12 实测通过
 
 ## v1.0.10 (2026-08-12)
 
