@@ -14,7 +14,7 @@
   以及超过保留期的日汇总行 `status_daily`
 - 清理后自动 WAL checkpoint(TRUNCATE) + 增量回收 + `PRAGMA optimize`；
   `journal_size_limit` 设为 64MB —— 解决长期运行 `-wal` 文件膨胀问题
-  （实测生产库 2.61GB 主库 + **5.99GB WAL**，checkpoint 后 1.1s 回收 5.7GB）
+  （实测生产库主库 2490.8MB + `-wal` 5711.7MB（合计 8.2GB），checkpoint 后 1.1s 回收 5.58GB）
 - 新库自动启用 `auto_vacuum=INCREMENTAL`：清理掉的空闲页可增量归还文件系统
 - 新增离线维护命令 `DEVICE-LINK.exe --vacuum-now`：清理全部过期数据并 VACUUM 整库
   回收磁盘（需先退出正在运行的程序；检测到数据库被占用时拒绝执行并返回码 1）
