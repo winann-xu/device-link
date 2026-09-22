@@ -65,3 +65,10 @@ DEVICE-LINK-CODEX-PROMPT.md
 CODEX-TESTER.md
 env-setup*.log
 uv-setup.log
+
+# ---- 本地临时工作区/调试产物（Hermes/Codex 协作，不入库）----
+work_tmp/
+.pytest-tmp/
+config/.secret.key
+config/test_credentials.json
+build_out*/

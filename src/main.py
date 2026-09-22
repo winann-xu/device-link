@@ -2,6 +2,8 @@
 模块：main.py
 功能：DEVICE LINK 主入口
      负责：配置加载→数据库初始化→设备加载→调度器启动→告警引擎启动→看门狗→UI启动
+     另含历史数据保留策略线程（自动清理超过保留期的记录，默认 30 天）
+     与离线维护命令 --vacuum-now（清理 + VACUUM 回收磁盘，需主程序未运行）
 
 作者：Claude
 创建日期：2026-08-07
@@ -47,6 +49,7 @@ from src.storage.repositories import (
 )
 from src.core.monitor_scheduler import MonitorScheduler
 from src.alerts.alert_engine import AlertEngine
+from src.storage.maintenance import DataRetentionWorker, run_maintenance_command
 from src.watchdog.watchdog_manager import HealthCheckThread, WatchdogProcess
 
 logger = logging.getLogger("device-link")
@@ -81,7 +84,7 @@ def load_config(config_path: str = None) -> dict:
                 logger.warning(f"默认配置文件不存在: {default_config}，写入最小配置")
                 with open(config_path, 'w', encoding='utf-8') as f:
                     yaml.safe_dump({
-                    "app": {"name": "DEVICE LINK", "version": "1.0.10",
+                    "app": {"name": "DEVICE LINK", "version": "1.0.11",
                             "start_minimized": True, "minimize_to_tray": True,
                             "single_instance": True},
                     "monitor": {"default_interval_seconds": 30,
@@ -102,7 +105,17 @@ def load_config(config_path: str = None) -> dict:
                                "retry_count": 3, "retry_backoff_base_seconds": 5,
                                "cooldown_seconds": 1800, "escalation_minutes": 15},
                     "storage": {"engine": "sqlite", "path": "./data/device-link.db",
-                                "history_retention_days": 90},
+                                "history_retention_days": 30,
+                                "cleanup": {"enabled": True, "retention_days": 30,
+                                            "interval_minutes": 60, "batch_size": 5000,
+                                            "batch_sleep_ms": 50,
+                                            "max_rows_per_run": 2000000,
+                                            "alert_events_enabled": True,
+                                            "daily_stats_enabled": True,
+                                            "daily_stats_rebuild_days": 2,
+                                            "vacuum_enabled": False,
+                                            "vacuum_freelist_percent": 20,
+                                            "optimize_enabled": True}},
                     "logging": {"level": "INFO", "path": "./logs/device-link.log",
                                 "max_size_mb": 100, "backup_count": 5},
                     "ui": {"theme": "light", "accent_color": "#1890FF",
@@ -189,6 +202,9 @@ def main():
     parser.add_argument('--config', help='配置文件路径')
     parser.add_argument('--no-watchdog', action='store_true', help='禁用看门狗')
     parser.add_argument('--cli', action='store_true', help='命令行模式（不启动 GUI）')
+    parser.add_argument('--vacuum-now', action='store_true',
+                        help='离线维护：清理超过保留期的历史记录并 VACUUM 回收磁盘空间'
+                             '（执行前请先退出正在运行的 DEVICE LINK）')
     parser.add_argument('--watchdog', action='store_true',
                         help='看门狗独立子进程模式（由主进程自动拉起，勿手动运行）')
     parser.add_argument('--parent-pid', type=int, default=0,
@@ -221,6 +237,11 @@ def main():
     db_path = get_db_path(config)
     conn = init_database(db_path, config)
     logger.info(f"数据库已初始化: {db_path}")
+
+    # 3.5 离线维护命令：清理过期历史 + VACUUM（需主程序未运行，见 --help）
+    if args.vacuum_now:
+        code = run_maintenance_command(config, conn)
+        raise SystemExit(code)
 
     # 4. 创建仓库实例（每个线程自动获取自己的连接，杜绝跨线程共享导致的 sqlite3.dll 崩溃）
     device_repo = DeviceRepository()
@@ -267,6 +288,11 @@ def main():
 
     # 9. 启动调度器
     scheduler.start()
+
+    # 9.5 历史数据保留策略：启动即跑一轮，之后每 storage.cleanup.interval_minutes 一轮
+    #     （分批删除超过保留期（默认 30 天）的记录，避免 data/ 无限膨胀）
+    retention = DataRetentionWorker(config, scheduler=scheduler)
+    retention.start()
 
     # 10. 启动 UI 或 CLI 模式
     if args.cli:
@@ -318,6 +344,7 @@ def main():
     # 11. 清理
     if watchdog is not None:
         watchdog.mark_clean_shutdown()
+    retention.stop()
     scheduler.stop()
     logger.info("DEVICE LINK 已退出")
 

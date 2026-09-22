@@ -10,6 +10,7 @@
 import sqlite3
 import os
 import sys
+import time
 import threading
 import logging
 from typing import Optional
@@ -75,6 +76,25 @@ CREATE TABLE IF NOT EXISTS status_history (
 );
 CREATE INDEX IF NOT EXISTS idx_sh_device_time ON status_history(device_id, checked_at);
 
+-- 每日统计汇总表（v1.0.11）：历史统计页的数据源
+-- 每次探测以 (设备, 日期) 为键累加计数；历史页统计读这张小表
+-- （天数 × 设备数，1000 台 × 30 天 ≈ 3 万行），不再扫描 status_history
+-- （1000 台 30 秒间隔时 status_history 30 天就有近 1 亿行）。
+-- WITHOUT ROWID：主键即存储顺序，按设备查统计是一次连续读。
+CREATE TABLE IF NOT EXISTS status_daily (
+    device_id INTEGER NOT NULL,
+    stat_date TEXT NOT NULL,
+    total_count INTEGER DEFAULT 0,
+    online_count INTEGER DEFAULT 0,
+    offline_count INTEGER DEFAULT 0,
+    latency_sum REAL DEFAULT 0.0,
+    updated_at TEXT DEFAULT (datetime('now','localtime')),
+    PRIMARY KEY (device_id, stat_date),
+    FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE
+) WITHOUT ROWID;
+-- 全局统计（不按设备过滤）按日期区间扫描
+CREATE INDEX IF NOT EXISTS idx_sd_date ON status_daily(stat_date);
+
 -- 告警规则表
 CREATE TABLE IF NOT EXISTS alert_rules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -115,6 +135,42 @@ CREATE TABLE IF NOT EXISTS notification_channels (
     last_test_success INTEGER DEFAULT 0
 );
 """
+
+# ============================================================
+# 性能索引（v1.0.11 历史统计加速）
+# ------------------------------------------------------------
+# 统计查询主要走日汇总表 status_daily（见 maintenance/repositories），
+# 这里的索引服务于：
+#   1) 保留期分批清理：WHERE checked_at < ? ORDER BY checked_at LIMIT n
+#      → 必须以 checked_at 打头；带 status 列可让"全局在线率"回退统计变成索引内计数
+#   2) 全域在线率回退：WHERE checked_at>=? [AND status='online']（同上）
+#   3) 离线时长统计：status='offline' 的部分索引（离线行占比极小，索引体积远小于全表）
+#   单设备区间查询继续用老的 idx_sh_device_time(device_id, checked_at)，不额外加宽索引
+# 单独抽出成脚本的原因：老库首次建索引可能要几十秒到数分钟，
+# 放在 ensure_indexes() 里可计时并写启动日志，不会静默拖慢启动。
+# ============================================================
+PERFORMANCE_INDEX_DDL = {
+    'idx_sh_checked_status':
+        "CREATE INDEX IF NOT EXISTS idx_sh_checked_status "
+        "ON status_history(checked_at, status)",
+    'idx_sh_offline':
+        "CREATE INDEX IF NOT EXISTS idx_sh_offline "
+        "ON status_history(device_id, checked_at) WHERE status='offline'",
+    'idx_ae_created_at':
+        "CREATE INDEX IF NOT EXISTS idx_ae_created_at ON alert_events(created_at)",
+    'idx_ae_pending_escalation':
+        "CREATE INDEX IF NOT EXISTS idx_ae_pending_escalation "
+        "ON alert_events(event_type, is_acknowledged, created_at)",
+    'idx_ae_device_created':
+        "CREATE INDEX IF NOT EXISTS idx_ae_device_created ON alert_events(device_id, created_at)",
+}
+
+# 需要保留但不再由本模块创建的索引（老库已有；新库由 CREATE_TABLES_SQL 创建）：
+#   idx_sh_device_time(device_id, checked_at) —— 单设备区间查询/回退统计
+#     （实测：三列覆盖索引要多占约 1/3 索引空间，而历史页统计已改读日汇总表，
+#      不值得为罕见回退路径长期付出这个体积代价）
+# 没有被新索引覆盖的冗余索引：无
+REDUNDANT_INDEXES = ()
 
 
 def get_db_path(config: Optional[dict] = None) -> str:
@@ -172,16 +228,60 @@ def get_connection(db_path: Optional[str] = None, config: Optional[dict] = None)
         # 注意：不使用 check_same_thread=False。
         # 每个线程通过 threading.local() 持有自己独立的连接，
         # 不存在跨线程共享，因此不需要禁用 Python 的线程安全检查。
+        # 是否全新数据库：auto_vacuum 只能在建表前设置（老库需 VACUUM 才能切换）
+        _is_new_db = (not os.path.exists(db_path)) or os.path.getsize(db_path) == 0
         _local.conn = sqlite3.connect(db_path)
         _local.conn.row_factory = sqlite3.Row
+        # 新库启用增量回收（必须在 journal_mode / 建表之前执行：
+        # 切 WAL 或写入 schema 会把 auto_vacuum 现值固化进库头，之后再设只算"待生效"，
+        # 需要 VACUUM 才落地）→ 清理历史后 incremental_vacuum 能把空闲页还给文件系统
+        if _is_new_db:
+            _local.conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
         # WAL 模式 —— 支持多连接并发读
         _local.conn.execute("PRAGMA journal_mode=WAL")
         # busy_timeout —— 写锁等待 5 秒
         _local.conn.execute("PRAGMA busy_timeout=5000")
         # 外键约束
         _local.conn.execute("PRAGMA foreign_keys=ON")
+        # WAL 文件上限 64MB：checkpoint 后自动截断，避免 data/ 下 -wal 文件长期膨胀
+        _local.conn.execute("PRAGMA journal_size_limit=67108864")
         logger.debug(f"线程 {threading.current_thread().name} 创建数据库连接: {db_path}")
     return _local.conn
+
+
+def ensure_indexes(conn: sqlite3.Connection) -> dict:
+    """确保性能索引到位，并移除被覆盖的冗余索引（v1.0.11）。
+
+    幂等：已存在的索引不会重建（大表建索引耗时可达分钟级，启动日志会记录耗时）。
+
+    参数:
+        conn: 数据库连接
+
+    返回:
+        {'created': [索引名...], 'dropped': [索引名...], 'elapsed_s': float}
+    """
+    existing = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='index'")}
+    created = []
+    t0 = time.perf_counter()
+    for name, ddl in PERFORMANCE_INDEX_DDL.items():
+        if name in existing:
+            continue
+        conn.execute(ddl)
+        created.append(name)
+    dropped = []
+    for name in REDUNDANT_INDEXES:
+        if name in existing:
+            conn.execute(f"DROP INDEX IF EXISTS {name}")
+            dropped.append(name)
+    if created or dropped:
+        conn.commit()
+    elapsed = time.perf_counter() - t0
+    if created:
+        logger.info(f"性能索引已创建（{elapsed:.1f}s）: {', '.join(created)}")
+    if dropped:
+        logger.info(f"已移除冗余索引: {', '.join(dropped)}（已被覆盖索引包含，省磁盘）")
+    return {'created': created, 'dropped': dropped, 'elapsed_s': elapsed}
 
 
 def init_database(db_path: Optional[str] = None, config: Optional[dict] = None) -> sqlite3.Connection:
@@ -201,7 +301,13 @@ def init_database(db_path: Optional[str] = None, config: Optional[dict] = None) 
     try:
         conn.executescript(CREATE_TABLES_SQL)
         conn.commit()
-        logger.info("数据库表初始化完成（6 表 + 索引）")
+        logger.info("数据库表初始化完成（7 表 + 索引）")
+        # 性能索引 + 冗余索引清理（老库首次升级会在这里补索引，日志带耗时）
+        _idx = ensure_indexes(conn)
+        logger.info(
+            f"索引检查完成: 新建 {len(_idx['created'])} 个, "
+            f"移除冗余 {len(_idx['dropped'])} 个, 耗时 {_idx['elapsed_s']:.2f}s"
+        )
     except sqlite3.Error as e:
         logger.error(f"数据库初始化失败: {e}")
         try:

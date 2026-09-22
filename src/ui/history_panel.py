@@ -191,22 +191,22 @@ class HistoryPanel:
                 self._device_combo.blockSignals(False)
 
             # 更新在线率卡片
+            # v1.0.11 性能：一次查询算完 今天/7天/30天（原来 3 个周期 × 2 条 COUNT
+            # = 6 次范围统计，切到「全部设备」时每次都要全窗口扫描）
             from PySide6.QtWidgets import QLabel
+            try:
+                uptime_summary = self._history_repo.compute_uptime_summary(selected_id)
+            except Exception as e:
+                logger.error(f"在线率统计失败: {e}")
+                uptime_summary = {}
             for period, card, title in [
                 ('day', self._uptime_day, '今日在线率'),
                 ('week', self._uptime_week, '本周在线率'),
                 ('month', self._uptime_month, '本月在线率'),
             ]:
-                try:
-                    if selected_id is None:
-                        uptime = self._history_repo.compute_overall_uptime(period)
-                    else:
-                        uptime = self._history_repo.compute_uptime(selected_id, period)
-                    label = card.findChild(QLabel, f"stat_{title}")
-                    if label:
-                        label.setText(f"{uptime * 100:.1f}%")
-                except Exception as e:
-                    logger.error(f"在线率统计失败({period}): {e}")
+                label = card.findChild(QLabel, f"stat_{title}")
+                if label:
+                    label.setText(f"{uptime_summary.get(period, 0.0) * 100:.1f}%")
 
             # 离线排行榜（周期跟随时间范围按钮）
             days_map = {'day': 1, 'week': 7, 'month': 30}
@@ -230,10 +230,13 @@ class HistoryPanel:
                 self._alert_table.setRowCount(len(events))
                 from PySide6.QtWidgets import QTableWidgetItem
                 from PySide6.QtCore import Qt
+                # 设备名一次映射好（v1.0.11：原来是每行一次 get_device，200 行 = 200 次查询）
+                device_names = {d['id']: d.get('name', '') for d in devices}
                 for i, ev in enumerate(events):
-                    dev = self._device_repo.get_device(ev.get('device_id', 0)) or {}
+                    did = ev.get('device_id', 0)
+                    dev_name = device_names.get(did) or f"#{did}"
                     self._alert_table.setItem(i, 0, self._item(ev.get('created_at', '')))
-                    self._alert_table.setItem(i, 1, self._item(dev.get('name', f"#{ev.get('device_id', '')}")))
+                    self._alert_table.setItem(i, 1, self._item(dev_name))
                     self._alert_table.setItem(i, 2, self._item(ev.get('event_type', '')))
                     self._alert_table.setItem(i, 3, self._item(ev.get('message', '')))
                     self._alert_table.setItem(i, 4, self._item(ev.get('notified_channels', '') or '-'))

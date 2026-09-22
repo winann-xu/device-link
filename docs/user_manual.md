@@ -1,12 +1,12 @@
 # DEVICE LINK 使用手册
 
-> 版本: 1.0.10 | 平台: Windows 10/11 (64位) | 部署: 免安装便携版
+> 版本: 1.0.11 | 平台: Windows 10/11 (64位) | 部署: 免安装便携版
 
 ## 1. 快速开始
 
 ### 1.1 安装
 
-1. 解压 `DEVICE-LINK-v1.0.10.zip` 到任意目录（路径建议使用英文，避免个别环境编码问题）
+1. 解压 `DEVICE-LINK-v1.0.11.zip` 到任意目录（路径建议使用英文，避免个别环境编码问题）
 2. 双击 `DEVICE-LINK.exe` 即可运行
 3. 系统托盘出现 DEVICE LINK 图标，说明启动成功
 
@@ -218,7 +218,7 @@
 ## 7. 文件结构
 
 ```
-DEVICE-LINK-v1.0.10/
+DEVICE-LINK-v1.0.11/
 ├── DEVICE-LINK.exe          # 主程序
 ├── config/
 │   ├── config.yaml          # 配置文件（首次启动自动生成）
@@ -228,9 +228,47 @@ DEVICE-LINK-v1.0.10/
 ├── logs/
 │   ├── device-link.log          # 运行日志
 │   ├── watchdog_state.json      # 看门狗重启计数（自动维护）
-│   └── daily_report_state.json  # 每日报告发送日期（自动维护）
+│   ├── daily_report_state.json  # 每日报告发送日期（自动维护）
+│   └── retention_state.json     # 最近一轮历史清理结果（v1.0.11 自动维护）
 └── assets/                  # 图标等资源
 ```
+
+## 7.1 数据保留与磁盘维护（v1.0.11 新增）
+
+程序按设备数量 × 检查间隔持续写入历史记录：1143 台设备 120 秒间隔约 88 万行/天，
+30 天窗口近 2600 万行。长期运行会让 `data/device-link.db` 持续膨胀，
+历史统计查询也会随之变慢。v1.0.11 起自动处理：
+
+| 机制 | 默认值 | 说明 |
+| --- | --- | --- |
+| 保留期 | 30 天 | 超过保留期的 `status_history` 记录被自动删除 |
+| 清理周期 | 每 60 分钟 | 启动时立刻先跑一轮，之后按周期执行 |
+| 单批删除 | 5000 行 / 批，批间停 50ms | 每批结束即释放写锁，探测落库不受影响 |
+| 单轮上限 | 200 万行 | 首次上线时库里积压很多，分多轮慢慢清完，不阻塞界面 |
+| 告警事件 | 30 天（仅已确认） | 未确认事件保留，避免影响告警升级逻辑 |
+| WAL 上限 | 64 MB | checkpoint 后自动截断 `-wal` 文件（旧版会无限膨胀） |
+| 空间回收 | 清理后自动 | 新库启用增量回收；老库可用 `--vacuum-now` 一次性压缩 |
+
+**历史统计为什么这么快**：每次探测除了写历史明细，还在 `status_daily` 表里累加
+「当日总数 / 在线数 / 离线数」（与明细同一事务）。历史页的在线率与离线排行榜
+直接读这张小表（1143 台 × 30 天 ≈ 3.4 万行），不再扫描上千万行的历史明细。
+老库首次启动会自动回填这张表（一次，日志有记录），之后每轮只重算最近 2 天。
+
+每轮清理结果写入 `logs/retention_state.json`（删除行数、剩余最早记录、库大小），
+运行日志中对应 `历史数据清理完成: 删除 status_history N 行 ...` 一行。
+
+### 手动压缩数据库（老库回收磁盘空间）
+
+老版本升级上来的库不会自动缩小文件体积（内容删了但空间留在文件里）。
+需要回收时，**先退出 DEVICE LINK**，再在程序目录执行：
+
+```bat
+DEVICE-LINK.exe --vacuum-now
+```
+
+它会一次性删除所有超过保留期的记录并 VACUUM 整库（输出清理前后体积）。
+若检测到程序仍在运行（数据库被占用），会直接退出不做任何改动。
+源码方式运行等价命令：`python src/main.py --vacuum-now`。
 
 ## 8. 配置项速查（config/config.yaml）
 
@@ -278,6 +316,22 @@ watchdog:
   max_restart_attempts: 3            # 连续崩溃最大重启次数
   restart_cooldown_seconds: 30       # 重启冷却
   healthy_threshold_seconds: 300     # 稳定运行多久后复位重启计数
+storage:
+  path: "./data/device-link.db"      # 数据库文件
+  history_retention_days: 30         # 历史保留天数（旧键，清理以 cleanup.retention_days 为准）
+  cleanup:                           # 历史数据自动清理（v1.0.11）
+    enabled: true                    # 总开关
+    retention_days: 30               # 只保留最近 N 天（超过即删）
+    interval_minutes: 60             # 清理周期（分钟）
+    batch_size: 5000                 # 单批删除行数
+    batch_sleep_ms: 50               # 批间休眠（毫秒），给探测落库让锁
+    max_rows_per_run: 2000000        # 单轮最多删除行数
+    alert_events_enabled: true       # 同步清理过期且已确认的告警事件
+    daily_stats_enabled: true        # 维护历史统计日汇总表 status_daily
+    daily_stats_rebuild_days: 2      # 非首次回填时只重算最近 N 天
+    vacuum_enabled: false            # 清理后是否 VACUUM（会短暂暂停探测；手动用 --vacuum-now）
+    vacuum_freelist_percent: 20      # 空闲页占比超过该值才值得 VACUUM
+    optimize_enabled: true           # 清理后执行 PRAGMA optimize
 ```
 
 ## 9. 常见问题
@@ -301,6 +355,19 @@ watchdog:
 
 设备管理页面 →「📥 导入CSV」→ 按模板填写（设备名,IP,子系统,探测方式,端口,
 检查间隔,失败阈值,是否启用）→ 导入。设备名重复的行会被跳过并提示。
+
+### Q: data 目录越来越大 / 历史页打开变慢？
+
+v1.0.11 起自动只保留最近 30 天历史（`storage.cleanup`），无需人工干预；
+首次升级老库时后台会分多轮清完积压数据，日志中会看到每轮的删除行数。
+若希望文件体积也立刻缩小，退出程序后执行 `DEVICE-LINK.exe --vacuum-now`。
+如需保留更久（例如 90 天），把 `storage.cleanup.retention_days` 改成 90 即可。
+
+### Q: 历史记录被删了会不会影响告警判断？
+
+不会。实时告警只看设备当前状态与连续失败次数（`devices` 表），与历史表无关；
+历史表只服务于在线率、离线排行榜等统计。超过保留期的已确认告警事件也会被清理，
+未确认事件不受影响。
 
 ### Q: 日志里出现"设备状态落库失败：database is locked"？
 

@@ -6,7 +6,7 @@
 
 app:
   name: "DEVICE LINK"
-  version: "1.0.10"
+  version: "1.0.11"
   language: "zh-CN"
   start_minimized: true
   minimize_to_tray: true
@@ -67,7 +67,34 @@ notify:
 storage:
   engine: "sqlite"
   path: "./data/device-link.db"
-  history_retention_days: 90
+  # 历史记录保留天数（超出部分由后台清理线程自动删除）
+  history_retention_days: 30
+  # 历史数据自动清理（v1.0.11）：防止 data/ 目录与历史统计查询随时间膨胀
+  cleanup:
+    # 总开关
+    enabled: true
+    # 保留天数（优先于上方的 history_retention_days）
+    retention_days: 30
+    # 清理周期（分钟）：启动时会立即执行一轮
+    interval_minutes: 60
+    # 单批删除行数 + 批间休眠（毫秒）：每批结束即释放写锁，探测落库不被长时间阻塞
+    batch_size: 5000
+    batch_sleep_ms: 50
+    # 单轮最多删除行数（防止积压库首次清理长时间占用）
+    max_rows_per_run: 2000000
+    # 同步清理超过保留期且【已确认】的告警事件（未确认的保留，避免影响升级逻辑）
+    alert_events_enabled: true
+    # 历史统计日汇总表（status_daily）：历史页在线率/排行榜的数据源
+    daily_stats_enabled: true
+    # 非首次回填时只重算最近 N 天（修复旧版本运行期间漏记的计数）
+    daily_stats_rebuild_days: 2
+    # 清理后是否 VACUUM 回收磁盘（需独占，会短暂暂停探测，默认关闭；
+    # 平时可手动执行: DEVICE-LINK.exe --vacuum-now）
+    vacuum_enabled: false
+    # 空闲页占比超过该值才值得 VACUUM（配合 vacuum_enabled）
+    vacuum_freelist_percent: 20
+    # 清理后执行 PRAGMA optimize（让统计查询稳定命中索引）
+    optimize_enabled: true
 
 logging:
   level: "INFO"

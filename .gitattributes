@@ -1,0 +1,8 @@
+# 行尾策略：仓库内统一存 LF，检出到 Windows 时自动转 CRLF。
+# 目的：Windows 侧编辑器写入 CRLF 时不再产生“整文件改动”的噪音 diff。
+* text=auto
+
+# 二进制文件不做行尾转换
+*.png binary
+*.ico binary
+*.db binary

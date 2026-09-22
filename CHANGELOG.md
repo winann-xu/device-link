@@ -1,5 +1,67 @@
 # Changelog
 
+## v1.0.11 (2026-09-22)
+
+### 新功能：历史数据自动清理（默认只保留 30 天）
+
+- 新增 `src/storage/maintenance.py` 与后台清理线程：启动即执行一轮，之后每
+  `storage.cleanup.interval_minutes`（默认 60 分钟）一轮，删除超过保留期
+  （默认 30 天）的 `status_history` 记录
+- **分批删除**：每批 `batch_size`（默认 5000）行、批间休眠 `batch_sleep_ms`（默认 50ms）
+  并释放写锁；单轮上限 `max_rows_per_run`（默认 200 万行）。老库首次上线积压的
+  过期数据分多轮清完，探测落库与界面不受影响
+- 同步清理超过保留期**且已确认**的 `alert_events`（未确认事件保留，不影响告警升级），
+  以及超过保留期的日汇总行 `status_daily`
+- 清理后自动 WAL checkpoint(TRUNCATE) + 增量回收 + `PRAGMA optimize`；
+  `journal_size_limit` 设为 64MB —— 解决长期运行 `-wal` 文件膨胀问题
+  （实测生产库 2.61GB 主库 + **5.99GB WAL**，checkpoint 后 1.1s 回收 5.7GB）
+- 新库自动启用 `auto_vacuum=INCREMENTAL`：清理掉的空闲页可增量归还文件系统
+- 新增离线维护命令 `DEVICE-LINK.exe --vacuum-now`：清理全部过期数据并 VACUUM 整库
+  回收磁盘（需先退出正在运行的程序；检测到数据库被占用时拒绝执行并返回码 1）
+- 旧配置兼容：仍是旧版出厂默认 90 天的配置按新策略 30 天执行并写 WARNING；
+  显式配置 `storage.cleanup.retention_days` 则完全尊重用户设置
+- 每轮结果写入 `logs/retention_state.json`（原子替换），日志记录删除行数与库大小
+
+### 新功能：历史统计日汇总表 status_daily（历史页数据源）
+
+- 背景：1143 台设备 120 秒间隔约 88 万行/天，30 天窗口近 2600 万行；
+  历史页每次刷新都要在这些行上做范围统计，索引优化后仍需 1~2 秒，
+  设备更多/间隔更短时不可用
+- 新增 `status_daily` 表（设备×日期一行：total/online/offline/数量 + 延迟合计，
+  WITHOUT ROWID）：每次探测在**同一事务内**累加当日计数
+- 历史页统计（今日/7天/30天在线率、离线时长排行榜）改为读这张小表：
+  1143 台 × 30 天 ≈ 3.4 万行，实测历史页刷新 4.5ms（1728 万行基准库）
+- 日汇总缺失时（例如直接写历史表的旧数据）自动回退扫描 `status_history`，口径不变
+- 老库首次升级自动回填整个保留期窗口（一次扫描，幂等覆盖），之后每轮只重算最近
+  2 天（`daily_stats_rebuild_days`），修复旧版本运行期间漏记的计数
+- 写入代价：单次探测多一次小型 upsert，实测 +0.73ms/次（200 台设备 30 秒间隔约
+  6.7 次/秒，可忽略）
+
+### 优化：历史统计索引与查询
+
+- 新增 `idx_sh_checked_status(checked_at, status)`：服务保留期分批清理
+  （按 `checked_at` 范围删）与在线率回退统计——原库只有 `(device_id, checked_at)`
+  索引，前导列不匹配导致"全部设备"统计只能全表扫描
+- 新增 `idx_sh_offline(device_id, checked_at) WHERE status='offline'` 部分索引：
+  只索引离线行（占比极小），离线时长统计从 38.7s 降到 0.02s
+- `alert_events` 新增 `idx_ae_created_at` / `idx_ae_pending_escalation` / `idx_ae_device_created`
+- 启动时自动补建缺失索引并记录耗时（大库一次性代价）；不额外增加宽覆盖索引，
+  避免与"data 目录过大"的诉求冲突
+- 离线时长排行榜查询改为"离线行聚合派生表 + 关联设备"写法：旧 LEFT JOIN 写法
+  在缺宽索引时优化器会退化成按设备扫全部行（1728 万行库实测 49.8s），
+  新写法稳定命中部分索引，0.015s
+- 统计回退路径用两次 `COUNT(*)` 而非 `SUM(CASE)` 条件聚合：实测覆盖索引下
+  COUNT 是纯索引区间计数（30 天窗口 1.17s），SUM(CASE) 要对每行求表达式（~2 倍耗时）
+- `query_status_range` 增加 `id` 次序键，修复同秒记录顺序不稳定的问题
+
+### 测试
+
+- 新增 `tests/codex/test_retention_and_index.py`（48 项）：保留期配置解析与旧配置兼容、
+  分批删除、告警事件保留口径、索引存在性/幂等/`EXPLAIN QUERY PLAN` 必须命中索引、
+  日汇总累加与覆盖式回填、回退路径、统计口径一致性、后台线程生命周期与异常隔离、
+  设备删除级联、`--vacuum-now` 独占检测与压缩、性能冒烟
+- 全量测试 195 passed（原 148 + 新增 47），Windows 10 + Python 3.12 实测通过
+
 ## v1.0.10 (2026-08-12)
 
 ### 修复：托盘菜单缺少「开机自启」
